@@ -1,0 +1,319 @@
+//! Client for dust's gRPC control API.
+//!
+//! dust itself runs in its own process (`dust-headless`); this crate only speaks the protocol in
+//! `proto/dust_agent.proto`. Either [`launch`] a local `dust-headless` and get a [`Session`] on it,
+//! or [`Client::connect`] to a running server and [`Client::create_session`].
+//!
+//! ```no_run
+//! # async fn run() -> Result<(), dust_client::Error> {
+//! let session = dust_client::launch("game.nds", &Default::default()).await?;
+//! session.cycle(60).await?;
+//! assert_eq!(session.status().await?.frame, 60);
+//! # Ok(())
+//! # }
+//! ```
+
+pub mod pb {
+    tonic::include_proto!("dust_agent");
+}
+
+pub use pb::Control;
+
+use pb::dust_agent_client::DustAgentClient;
+use std::{
+    fmt, io,
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::Arc,
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    process::{Child, Command},
+};
+use tonic::transport::Channel;
+
+/// Environment variable naming the `dust-headless` binary used by [`launch`] when
+/// [`LaunchOptions::headless_bin`] is unset.
+pub const HEADLESS_BIN_ENV: &str = "DUST_HEADLESS";
+
+const LISTENING_PREFIX: &str = "dust-headless listening on ";
+const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug)]
+pub enum Error {
+    /// Couldn't connect to the server.
+    Connect(tonic::transport::Error),
+    /// The server answered with an error.
+    Rpc(tonic::Status),
+    /// Couldn't start `dust-headless`.
+    Launch(String),
+    Io(io::Error),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::Connect(err) => write!(f, "couldn't connect to dust: {err}"),
+            Error::Rpc(status) => {
+                write!(f, "dust returned {:?}: {}", status.code(), status.message())
+            }
+            Error::Launch(msg) => write!(f, "couldn't launch dust-headless: {msg}"),
+            Error::Io(err) => write!(f, "I/O error: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::Connect(err) => Some(err),
+            Error::Rpc(status) => Some(status),
+            Error::Launch(_) => None,
+            Error::Io(err) => Some(err),
+        }
+    }
+}
+
+impl From<tonic::Status> for Error {
+    fn from(status: tonic::Status) -> Self {
+        Error::Rpc(status)
+    }
+}
+
+impl From<tonic::transport::Error> for Error {
+    fn from(err: tonic::transport::Error) -> Self {
+        Error::Connect(err)
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(err: io::Error) -> Self {
+        Error::Io(err)
+    }
+}
+
+pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// Emulator settings for a new session. Paths are read by the server.
+#[derive(Clone, Debug, Default)]
+pub struct SessionOptions {
+    /// Firmware dump; dust's built-in firmware is used without one. The boot seed of many games
+    /// comes from the firmware MAC, so use the same dump as other emulators to match them.
+    pub firmware: Option<PathBuf>,
+    /// BIOS dumps. Booting through the firmware needs both; otherwise the ROM is booted directly.
+    pub arm7_bios: Option<PathBuf>,
+    pub arm9_bios: Option<PathBuf>,
+    /// Fixed RTC time in Unix seconds (UTC), for reproducible runs; `None` uses the host clock.
+    pub rtc_unix_time: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct LaunchOptions {
+    /// `dust-headless` binary; defaults to `$DUST_HEADLESS`, then `dust-headless` on `PATH`.
+    pub headless_bin: Option<PathBuf>,
+    pub session: SessionOptions,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Status {
+    /// Frames emulated since the session was created or last reset.
+    pub frame: u64,
+    pub game_title: String,
+    pub paused: bool,
+    pub control: Control,
+}
+
+impl From<pb::SessionStatus> for Status {
+    fn from(status: pb::SessionStatus) -> Self {
+        Status {
+            frame: status.frame,
+            control: status.control(),
+            game_title: status.game_title,
+            paused: status.paused,
+        }
+    }
+}
+
+fn absolute(path: &Path) -> Result<String> {
+    Ok(std::path::absolute(path)?.to_string_lossy().into_owned())
+}
+
+fn optional_absolute(path: &Option<PathBuf>) -> Result<String> {
+    path.as_deref()
+        .map(absolute)
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
+/// A connection to a dust server.
+#[derive(Clone)]
+pub struct Client {
+    grpc: DustAgentClient<Channel>,
+}
+
+impl Client {
+    /// Connects to a server, e.g. `"http://127.0.0.1:50051"`.
+    pub async fn connect(endpoint: impl Into<String>) -> Result<Self> {
+        Ok(Client {
+            grpc: DustAgentClient::connect(endpoint.into()).await?,
+        })
+    }
+
+    /// The generated gRPC client, for RPCs this crate doesn't wrap yet.
+    pub fn grpc(&self) -> DustAgentClient<Channel> {
+        self.grpc.clone()
+    }
+
+    /// Starts a new emulator session on the server with `rom`.
+    pub async fn create_session(
+        &self,
+        rom: impl AsRef<Path>,
+        opts: &SessionOptions,
+    ) -> Result<Session> {
+        let response = self
+            .grpc()
+            .create_session(pb::CreateSessionRequest {
+                rom_path: absolute(rom.as_ref())?,
+                firmware_path: optional_absolute(&opts.firmware)?,
+                arm7_bios_path: optional_absolute(&opts.arm7_bios)?,
+                arm9_bios_path: optional_absolute(&opts.arm9_bios)?,
+                rtc_unix_time: opts.rtc_unix_time,
+            })
+            .await?
+            .into_inner();
+        Ok(Session {
+            client: self.clone(),
+            id: response.session_id,
+            _server: None,
+        })
+    }
+}
+
+/// A `dust-headless` process started by [`launch`]; killed when the last session using it drops.
+struct ServerProcess {
+    _child: Child,
+}
+
+/// Spawns `dust-headless` on a free local port, connects to it and creates a session with `rom`.
+/// The server process is killed when the returned session (and its clones' sources) drop.
+pub async fn launch(rom: impl AsRef<Path>, opts: &LaunchOptions) -> Result<Session> {
+    let bin = opts
+        .headless_bin
+        .clone()
+        .or_else(|| std::env::var_os(HEADLESS_BIN_ENV).map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("dust-headless"));
+    let mut child = Command::new(&bin)
+        .args(["--port", "0"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|err| Error::Launch(format!("couldn't run {}: {err}", bin.display())))?;
+
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let mut lines = BufReader::new(stdout).lines();
+    let addr = tokio::time::timeout(LAUNCH_TIMEOUT, async {
+        while let Some(line) = lines.next_line().await? {
+            if let Some(addr) = line.strip_prefix(LISTENING_PREFIX) {
+                return Ok(addr.trim().to_owned());
+            }
+        }
+        Err(Error::Launch(
+            "dust-headless exited before listening".to_owned(),
+        ))
+    })
+    .await
+    .map_err(|_| Error::Launch("timed out waiting for dust-headless to listen".to_owned()))??;
+
+    let client = Client::connect(format!("http://{addr}")).await?;
+    let mut session = client.create_session(rom, &opts.session).await?;
+    session._server = Some(Arc::new(ServerProcess { _child: child }));
+    Ok(session)
+}
+
+/// One emulator instance on a server.
+#[derive(Clone)]
+pub struct Session {
+    client: Client,
+    id: String,
+    _server: Option<Arc<ServerProcess>>,
+}
+
+impl Session {
+    /// See [`launch`].
+    pub async fn launch(rom: impl AsRef<Path>, opts: &LaunchOptions) -> Result<Self> {
+        launch(rom, opts).await
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn client(&self) -> &Client {
+        &self.client
+    }
+
+    fn request(&self) -> pb::SessionRequest {
+        pb::SessionRequest {
+            session_id: self.id.clone(),
+        }
+    }
+
+    pub async fn status(&self) -> Result<Status> {
+        let status = self.client.grpc().get_status(self.request()).await?;
+        Ok(status.into_inner().into())
+    }
+
+    /// Emulates `frames` frames and returns the status afterwards.
+    pub async fn cycle(&self, frames: u32) -> Result<Status> {
+        let response = self
+            .client
+            .grpc()
+            .step(pb::StepRequest {
+                session_id: self.id.clone(),
+                frames,
+            })
+            .await?
+            .into_inner();
+        Ok(response.status.unwrap_or_default().into())
+    }
+
+    pub async fn pause(&self) -> Result<Status> {
+        Ok(self
+            .client
+            .grpc()
+            .pause(self.request())
+            .await?
+            .into_inner()
+            .into())
+    }
+
+    pub async fn resume(&self) -> Result<Status> {
+        Ok(self
+            .client
+            .grpc()
+            .resume(self.request())
+            .await?
+            .into_inner()
+            .into())
+    }
+
+    /// Restarts the emulator with the same ROM and options; the frame counter goes back to 0.
+    pub async fn reset(&self) -> Result<Status> {
+        Ok(self
+            .client
+            .grpc()
+            .reset(self.request())
+            .await?
+            .into_inner()
+            .into())
+    }
+
+    /// Ends the session on the server.
+    pub async fn destroy(self) -> Result<()> {
+        self.client.grpc().destroy_session(self.request()).await?;
+        Ok(())
+    }
+}

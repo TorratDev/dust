@@ -1,0 +1,584 @@
+// Control API for dust (Nintendo DS emulator).
+//
+// One server process hosts many sessions; each session is one emulator instance. Every call
+// except CreateSession carries the session id it acts on. RPCs not implemented yet by a server
+// return UNIMPLEMENTED.
+
+syntax = "proto3";
+
+package dust_agent;
+
+service DustAgent {
+  // --- Sessions ---------------------------------------------------------------------------------
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  rpc DestroySession(SessionRequest) returns (Empty);
+  rpc GetStatus(SessionRequest) returns (SessionStatus);
+  // Emulates `frames` whole frames.
+  rpc Step(StepRequest) returns (StepResponse);
+  rpc Pause(SessionRequest) returns (SessionStatus);
+  rpc Resume(SessionRequest) returns (SessionStatus);
+  // Rebuilds the emulator from the same ROM and options; the frame counter restarts at 0.
+  rpc Reset(SessionRequest) returns (SessionStatus);
+
+  // --- Input ------------------------------------------------------------------------------------
+  // Holds `buttons` for `frames` frames, then releases them.
+  rpc Press(PressRequest) returns (StepResponse);
+  rpc Hold(ButtonsRequest) returns (Empty);
+  rpc Release(ButtonsRequest) returns (Empty);
+  rpc Touch(TouchRequest) returns (StepResponse);
+  rpc TouchEnd(SessionRequest) returns (Empty);
+  rpc Sequence(SequenceRequest) returns (StepResponse);
+  // Sets the held buttons from a raw mask in py-desmume's bit order.
+  rpc SetKeypad(KeypadRequest) returns (Empty);
+
+  // --- Memory and CPU ---------------------------------------------------------------------------
+  rpc Read(ReadRequest) returns (ReadResponse);
+  rpc ReadMany(ReadManyRequest) returns (ReadManyResponse);
+  rpc Write(WriteRequest) returns (Empty);
+  rpc GetRegs(RegsRequest) returns (Regs);
+  rpc SetReg(SetRegRequest) returns (Empty);
+  // Changes to watched ranges are reported in StepResponse.changes.
+  rpc Watch(WatchRequest) returns (WatchResponse);
+  rpc Unwatch(UnwatchRequest) returns (Empty);
+
+  // --- Breakpoints and watchpoints --------------------------------------------------------------
+  rpc BreakAdd(BreakAddRequest) returns (HookId);
+  rpc BreakRemove(HookRequest) returns (Empty);
+  rpc BreakList(SessionRequest) returns (HookList);
+  rpc WatchWriteAdd(WatchWriteAddRequest) returns (HookId);
+  rpc WatchWriteRemove(HookRequest) returns (Empty);
+  // Breakpoint/watchpoint hits, logs and control changes. After a hit the emulator waits for
+  // Continue.
+  rpc Events(SessionRequest) returns (stream Event);
+  rpc Continue(SessionRequest) returns (Empty);
+
+  // --- Screen, save states and save files -------------------------------------------------------
+  rpc Screenshot(ScreenshotRequest) returns (Image);
+  rpc SaveState(StatePathRequest) returns (Empty);
+  rpc LoadState(StatePathRequest) returns (SessionStatus);
+  rpc SaveStateBytes(SaveStateBytesRequest) returns (StateBytes);
+  rpc LoadStateBytes(LoadStateBytesRequest) returns (SessionStatus);
+  rpc ExportSave(SaveFileRequest) returns (Empty);
+  rpc ImportSave(SaveFileRequest) returns (Empty);
+
+  // --- Observability ----------------------------------------------------------------------------
+  rpc MemoryMap(SessionRequest) returns (MemoryMapResponse);
+  rpc Dump(DumpRequest) returns (ReadResponse);
+  rpc Disasm(DisasmRequest) returns (DisasmResponse);
+  rpc Stats(StatsRequest) returns (EmuStats);
+  rpc Logs(LogsRequest) returns (LogsResponse);
+
+  // --- Parallel sessions and RL -----------------------------------------------------------------
+  // Steps several sessions concurrently and returns all observations in one reply.
+  rpc StepBatch(StepBatchRequest) returns (StepBatchResponse);
+  rpc LoadScenario(LoadScenarioRequest) returns (Empty);
+  // Loads one of the scenario's start states and returns the first observation.
+  rpc ResetEpisode(ResetEpisodeRequest) returns (Observation);
+
+  // --- Human handoff, control and settings ------------------------------------------------------
+  // Saves a state, pauses, shows `reason` and gives control to the human.
+  rpc RequestHelp(RequestHelpRequest) returns (Empty);
+  // Returns when the human hands control back.
+  rpc WaitForControl(SessionRequest) returns (ControlReturned);
+  rpc SetControl(SetControlRequest) returns (SessionStatus);
+  rpc GetConfig(SessionRequest) returns (Config);
+  rpc SetConfig(SetConfigRequest) returns (Config);
+}
+
+// --- Common -------------------------------------------------------------------------------------
+
+message Empty {}
+
+message SessionRequest {
+  string session_id = 1;
+}
+
+enum Control {
+  CONTROL_AGENT = 0;
+  CONTROL_HUMAN = 1;
+  CONTROL_SHARED = 2;
+}
+
+enum Cpu {
+  CPU_ARM9 = 0;
+  CPU_ARM7 = 1;
+}
+
+message SessionStatus {
+  // Frames emulated since the session was created or last reset.
+  uint64 frame = 1;
+  string game_title = 2;
+  bool paused = 3;
+  Control control = 4;
+}
+
+message MemRange {
+  uint32 addr = 1;
+  uint32 len = 2;
+}
+
+// --- Sessions -----------------------------------------------------------------------------------
+
+message CreateSessionRequest {
+  // ROM path on the server's file system.
+  string rom_path = 1;
+  // Optional; dust's built-in firmware is used when empty.
+  string firmware_path = 2;
+  // Optional; booting through the firmware needs both, otherwise the ROM is booted directly.
+  string arm7_bios_path = 3;
+  string arm9_bios_path = 4;
+  // Fixed RTC time in Unix seconds (UTC); the host clock is used when unset.
+  optional int64 rtc_unix_time = 5;
+}
+
+message CreateSessionResponse {
+  string session_id = 1;
+  SessionStatus status = 2;
+}
+
+message StepRequest {
+  string session_id = 1;
+  uint32 frames = 2;
+}
+
+message WatchChange {
+  uint32 watch_id = 1;
+  uint32 addr = 2;
+  bytes old_data = 3;
+  bytes new_data = 4;
+}
+
+message StepResponse {
+  SessionStatus status = 1;
+  repeated WatchChange changes = 2;
+}
+
+// --- Input --------------------------------------------------------------------------------------
+
+enum Button {
+  BUTTON_A = 0;
+  BUTTON_B = 1;
+  BUTTON_SELECT = 2;
+  BUTTON_START = 3;
+  BUTTON_RIGHT = 4;
+  BUTTON_LEFT = 5;
+  BUTTON_UP = 6;
+  BUTTON_DOWN = 7;
+  BUTTON_R = 8;
+  BUTTON_L = 9;
+  BUTTON_X = 10;
+  BUTTON_Y = 11;
+  BUTTON_DEBUG = 12;
+  BUTTON_LID_CLOSED = 13;
+}
+
+message PressRequest {
+  string session_id = 1;
+  repeated Button buttons = 2;
+  uint32 frames = 3;
+}
+
+message ButtonsRequest {
+  string session_id = 1;
+  repeated Button buttons = 2;
+}
+
+message TouchRequest {
+  string session_id = 1;
+  uint32 x = 2;
+  uint32 y = 3;
+  uint32 frames = 4;
+}
+
+message TouchPoint {
+  uint32 x = 1;
+  uint32 y = 2;
+}
+
+message InputStep {
+  repeated Button buttons = 1;
+  optional TouchPoint touch = 2;
+  uint32 frames = 3;
+}
+
+message SequenceRequest {
+  string session_id = 1;
+  repeated InputStep steps = 2;
+}
+
+message KeypadRequest {
+  string session_id = 1;
+  // py-desmume bit order.
+  uint32 mask = 2;
+}
+
+// --- Memory and CPU -----------------------------------------------------------------------------
+
+message ReadRequest {
+  string session_id = 1;
+  Cpu cpu = 2;
+  uint32 addr = 3;
+  uint32 len = 4;
+}
+
+message ReadResponse {
+  bytes data = 1;
+}
+
+message ReadManyRequest {
+  string session_id = 1;
+  Cpu cpu = 2;
+  repeated MemRange ranges = 3;
+}
+
+message ReadManyResponse {
+  repeated bytes data = 1;
+}
+
+message ValueWrite {
+  uint32 value = 1;
+  // 1, 2 or 4 bytes.
+  uint32 size = 2;
+}
+
+message WriteRequest {
+  string session_id = 1;
+  Cpu cpu = 2;
+  uint32 addr = 3;
+  oneof value {
+    bytes data = 4;
+    ValueWrite word = 5;
+  }
+}
+
+message RegsRequest {
+  string session_id = 1;
+  Cpu cpu = 2;
+}
+
+message Regs {
+  // r0-r15.
+  repeated uint32 gprs = 1;
+  uint32 cpsr = 2;
+}
+
+message SetRegRequest {
+  string session_id = 1;
+  Cpu cpu = 2;
+  // 0-15 for r0-r15 (15 = pc), 16 for cpsr.
+  uint32 reg = 3;
+  uint32 value = 4;
+}
+
+message WatchRequest {
+  string session_id = 1;
+  Cpu cpu = 2;
+  uint32 addr = 3;
+  uint32 len = 4;
+}
+
+message WatchResponse {
+  uint32 watch_id = 1;
+}
+
+message UnwatchRequest {
+  string session_id = 1;
+  uint32 watch_id = 2;
+}
+
+// --- Breakpoints and watchpoints ----------------------------------------------------------------
+
+message BreakAddRequest {
+  string session_id = 1;
+  Cpu cpu = 2;
+  uint32 addr = 3;
+  // Read on every hit and sent with the event.
+  repeated MemRange reads = 4;
+}
+
+message WatchWriteAddRequest {
+  string session_id = 1;
+  Cpu cpu = 2;
+  uint32 addr = 3;
+  uint32 size = 4;
+  repeated MemRange reads = 5;
+}
+
+message HookId {
+  uint32 id = 1;
+}
+
+message HookRequest {
+  string session_id = 1;
+  uint32 id = 2;
+}
+
+enum HookKind {
+  HOOK_KIND_BREAKPOINT = 0;
+  HOOK_KIND_WRITE_WATCHPOINT = 1;
+}
+
+message Hook {
+  uint32 id = 1;
+  HookKind kind = 2;
+  Cpu cpu = 3;
+  uint32 addr = 4;
+  uint32 size = 5;
+  repeated MemRange reads = 6;
+}
+
+message HookList {
+  repeated Hook hooks = 1;
+}
+
+message HookHit {
+  uint32 id = 1;
+  HookKind kind = 2;
+  Cpu cpu = 3;
+  // Executed address for breakpoints, written address for watchpoints.
+  uint32 addr = 4;
+  // Written value for watchpoints.
+  uint32 value = 5;
+  uint64 frame = 6;
+  Regs regs = 7;
+  // Results of the hook's registered reads, in order.
+  repeated bytes reads = 8;
+}
+
+message Event {
+  oneof kind {
+    HookHit hook_hit = 1;
+    LogEntry log = 2;
+    ControlReturned control_returned = 3;
+  }
+}
+
+// --- Screen, save states and save files ---------------------------------------------------------
+
+enum ImageFormat {
+  IMAGE_FORMAT_RAW_RGB = 0;
+  IMAGE_FORMAT_PNG = 1;
+}
+
+message ScreenshotRequest {
+  string session_id = 1;
+  ImageFormat format = 2;
+}
+
+message Image {
+  // Both screens, top above bottom: 256x384.
+  uint32 width = 1;
+  uint32 height = 2;
+  ImageFormat format = 3;
+  bytes data = 4;
+}
+
+message StatePathRequest {
+  string session_id = 1;
+  string path = 2;
+  // SaveState only: also store the cartridge save.
+  bool include_save = 3;
+}
+
+message SaveStateBytesRequest {
+  string session_id = 1;
+  bool include_save = 2;
+}
+
+message StateBytes {
+  bytes state = 1;
+  optional bytes save = 2;
+}
+
+message LoadStateBytesRequest {
+  string session_id = 1;
+  bytes state = 2;
+  optional bytes save = 3;
+}
+
+enum SaveFormat {
+  SAVE_FORMAT_RAW = 0;
+  // DeSmuME .dsv (raw save plus a footer).
+  SAVE_FORMAT_DSV = 1;
+}
+
+message SaveFileRequest {
+  string session_id = 1;
+  string path = 2;
+  SaveFormat format = 3;
+}
+
+// --- Observability ------------------------------------------------------------------------------
+
+message MemoryRegion {
+  string name = 1;
+  Cpu cpu = 2;
+  uint32 start = 3;
+  uint32 size = 4;
+}
+
+message MemoryMapResponse {
+  repeated MemoryRegion regions = 1;
+}
+
+message DumpRequest {
+  string session_id = 1;
+  // A name from MemoryMap.
+  string region = 2;
+}
+
+message DisasmRequest {
+  string session_id = 1;
+  Cpu cpu = 2;
+  uint32 addr = 3;
+  uint32 count = 4;
+  bool thumb = 5;
+}
+
+message Instruction {
+  uint32 addr = 1;
+  uint32 raw = 2;
+  string text = 3;
+}
+
+message DisasmResponse {
+  repeated Instruction instructions = 1;
+}
+
+message StatsRequest {
+  string session_id = 1;
+  // Frames averaged over; 0 = server default.
+  uint32 window = 2;
+}
+
+message EmuStats {
+  double fps = 1;
+  double speed_percent = 2;
+  double frame_time_avg_us = 3;
+  double frame_time_max_us = 4;
+  uint64 late_frames = 5;
+  uint64 dropped_frames = 6;
+  uint64 total_frames = 7;
+  uint32 polygons = 8;
+  uint32 vertices = 9;
+  bool polygon_ram_overflow = 10;
+  bool vertex_ram_overflow = 11;
+  uint32 geometry_fifo_level = 12;
+}
+
+enum LogLevel {
+  LOG_LEVEL_TRACE = 0;
+  LOG_LEVEL_DEBUG = 1;
+  LOG_LEVEL_INFO = 2;
+  LOG_LEVEL_WARNING = 3;
+  LOG_LEVEL_ERROR = 4;
+}
+
+message LogEntry {
+  uint64 seq = 1;
+  uint64 frame = 2;
+  LogLevel level = 3;
+  string message = 4;
+}
+
+message LogsRequest {
+  string session_id = 1;
+  // Only entries with seq > since.
+  uint64 since = 2;
+  LogLevel min_level = 3;
+}
+
+message LogsResponse {
+  repeated LogEntry entries = 1;
+}
+
+// --- Parallel sessions and RL -------------------------------------------------------------------
+
+message ObservationSpec {
+  bool screen = 1;
+  bool grayscale = 2;
+  // Integer downscale factor; 0 or 1 = full size.
+  uint32 downscale = 3;
+  repeated MemRange ram = 4;
+  // The loaded scenario's variables.
+  bool variables = 5;
+}
+
+message Action {
+  repeated Button buttons = 1;
+  optional TouchPoint touch = 2;
+  // Index into the scenario's action set; used instead of buttons/touch when set.
+  optional uint32 discrete = 3;
+}
+
+message BatchItem {
+  string session_id = 1;
+  Action action = 2;
+  // 0 = the scenario's frame_skip (or 1 without a scenario).
+  uint32 frames = 3;
+}
+
+message StepBatchRequest {
+  repeated BatchItem items = 1;
+  ObservationSpec observation = 2;
+}
+
+message Observation {
+  string session_id = 1;
+  SessionStatus status = 2;
+  optional Image screen = 3;
+  repeated bytes ram = 4;
+  repeated double variables = 5;
+  double reward = 6;
+  bool terminated = 7;
+  bool truncated = 8;
+}
+
+message StepBatchResponse {
+  repeated Observation observations = 1;
+}
+
+message LoadScenarioRequest {
+  string session_id = 1;
+  // games/<id>/data.json: named RAM variables.
+  string data_path = 2;
+  // scenario.json: rewards, done conditions, start states, action set, frame_skip.
+  string scenario_path = 3;
+}
+
+message ResetEpisodeRequest {
+  string session_id = 1;
+  ObservationSpec observation = 2;
+}
+
+// --- Human handoff, control and settings --------------------------------------------------------
+
+message RequestHelpRequest {
+  string session_id = 1;
+  string reason = 2;
+}
+
+message ControlReturned {
+  uint64 frames_played = 1;
+  // Save states taken when help was requested and when control came back.
+  bytes state_before = 2;
+  bytes state_after = 3;
+}
+
+message SetControlRequest {
+  string session_id = 1;
+  Control control = 2;
+}
+
+message Config {
+  // Unset = unlimited.
+  optional double framerate_ratio_limit = 1;
+  bool sync_to_audio = 2;
+  // Same JSON as the input_map entry of dust's config file.
+  string input_map_json = 3;
+}
+
+message SetConfigRequest {
+  string session_id = 1;
+  Config config = 2;
+}

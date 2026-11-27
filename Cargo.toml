@@ -10,7 +10,11 @@ members = [
     "render/wgpu-3d",
     "frontend/desktop",
     "frontend/web/crate",
+    "frontend/agent",
+    "frontend/agent-grpc",
+    "frontend/headless",
 ]
+exclude = ["clients/rust"]
 resolver = "2"
 
 [profile.release]

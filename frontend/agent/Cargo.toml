@@ -1,0 +1,12 @@
+[package]
+name = "dust-agent"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Programmatic control API over dust's emulator core (Session)"
+
+[dependencies]
+dust-core = { path = "../../core" }
+dust-soft-2d = { path = "../../render/soft-2d" }
+dust-soft-3d = { path = "../../render/soft-3d" }
+chrono = "0.4"

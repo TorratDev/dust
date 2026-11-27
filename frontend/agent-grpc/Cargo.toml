@@ -1,0 +1,18 @@
+[package]
+name = "dust-agent-grpc"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "gRPC server for dust-agent sessions (proto/dust_agent.proto)"
+
+[dependencies]
+dust-agent = { path = "../agent" }
+tonic = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+protoc-bin-vendored = "3.3"
