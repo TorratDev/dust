@@ -1503,7 +1503,11 @@ title and FPS
 - Imgui: will completely hide the system title bar and render the title and FPS as part of the \
 menu",
                                     ),
-                                    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+                                    #[cfg(any(
+                                        target_os = "macos",
+                                        target_os = "linux",
+                                        target_os = "windows"
+                                    ))]
                                     (
                                         game_icon_mode,
                                         "Game icon mode",
@@ -1678,10 +1682,14 @@ with the Imgui title bar mode)
                         heading(
                             ui,
                             if self.data.game_loaded {
-                                Cow::from(format!("Game saves - {}", emu_state.as_deref().unwrap().title))
+                                Cow::from(format!(
+                                    "Game saves - {}",
+                                    emu_state.as_deref().unwrap().title
+                                ))
                             } else {
                                 "Game saves".into()
-                            }.as_ref(),
+                            }
+                            .as_ref(),
                             16.0,
                             5.0,
                             BORDER_WIDTH,
