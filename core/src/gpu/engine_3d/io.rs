@@ -413,15 +413,13 @@ impl Engine3d {
                     );
                 }
             }
-            0x602 => {
-                if emu.gpu.engine_3d.gx_enabled {
-                    emu.gpu.engine_3d.write_gx_status(
-                        GxStatus(
-                            (emu.gpu.engine_3d.gx_status().0 & 0x0000_7FFF) | (value as u32) << 16,
-                        ),
-                        &mut emu.arm9,
-                    );
-                }
+            0x602 if emu.gpu.engine_3d.gx_enabled => {
+                emu.gpu.engine_3d.write_gx_status(
+                    GxStatus(
+                        (emu.gpu.engine_3d.gx_status().0 & 0x0000_7FFF) | (value as u32) << 16,
+                    ),
+                    &mut emu.arm9,
+                );
             }
 
             _ =>
@@ -525,12 +523,10 @@ impl Engine3d {
                 }
             }
 
-            0x600 => {
-                if emu.gpu.engine_3d.gx_enabled {
-                    emu.gpu
-                        .engine_3d
-                        .write_gx_status(GxStatus(value), &mut emu.arm9);
-                }
+            0x600 if emu.gpu.engine_3d.gx_enabled => {
+                emu.gpu
+                    .engine_3d
+                    .write_gx_status(GxStatus(value), &mut emu.arm9);
             }
 
             _ =>
