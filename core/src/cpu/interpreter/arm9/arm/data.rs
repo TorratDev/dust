@@ -3,6 +3,7 @@ use super::super::{
     apply_reg_interlocks_3, prefetch_arm, reload_pipeline, restore_spsr,
     write_reg_clear_interlock_ab, write_reg_interlock_ab,
 };
+use crate::utils::{likely, unlikely};
 use crate::{
     cpu::interpreter::{
         alu_utils::{arithmetic, bit_ops, shifts},
@@ -11,20 +12,19 @@ use crate::{
     },
     emu::Emu,
 };
-use core::intrinsics::{likely, unlikely};
 
 // TODO: Check timing for r15 writes, the ARM9E-S manual says some operations take 4 bus cycles and
 //       some others take 3, but at the moment only register-specified shifts take 4 cycles, and all
 //       others take 3, regardless of the operation.
 
-pub fn dp_op<const OP_TY: DpOpTy, const OPERAND: DpOperand, const SET_FLAGS: bool>(
+pub fn dp_op<const OP_TY: u8, const OPERAND: u8, const SET_FLAGS: bool>(
     emu: &mut Emu<Interpreter>,
     instr: u32,
 ) {
     let src_reg = (instr >> 16 & 0xF) as u8;
-    let (src, op) = match OPERAND {
+    let (src, op) = match DpOperand::from_u8(OPERAND) {
         DpOperand::Imm => {
-            if !OP_TY.is_unary() {
+            if !DpOpTy::from_u8(OP_TY).is_unary() {
                 apply_reg_interlock_1::<false>(emu, src_reg);
             }
             add_bus_cycles(emu, 1);
@@ -32,7 +32,7 @@ pub fn dp_op<const OP_TY: DpOpTy, const OPERAND: DpOperand, const SET_FLAGS: boo
             let shift = instr >> 7 & 0x1E;
             // Don't calculate the shifter carry for arithmetic instructions, as they'll overwrite
             // the flag anyway
-            let op = if SET_FLAGS && !OP_TY.sets_carry() {
+            let op = if SET_FLAGS && !DpOpTy::from_u8(OP_TY).sets_carry() {
                 shifts::ror_imm_s_no_rrx(&mut emu.arm9.engine_data.regs, value, shift as u8)
             } else {
                 value.rotate_right(shift)
@@ -48,7 +48,7 @@ pub fn dp_op<const OP_TY: DpOpTy, const OPERAND: DpOperand, const SET_FLAGS: boo
         } => {
             let op_reg = (instr & 0xF) as u8;
             if shift_imm {
-                if OP_TY.is_unary() {
+                if DpOpTy::from_u8(OP_TY).is_unary() {
                     apply_reg_interlock_1::<false>(emu, op_reg);
                 } else {
                     apply_reg_interlocks_2::<0, false>(emu, src_reg, op_reg);
@@ -56,7 +56,7 @@ pub fn dp_op<const OP_TY: DpOpTy, const OPERAND: DpOperand, const SET_FLAGS: boo
                 add_bus_cycles(emu, 1);
                 let shift = (instr >> 7 & 0x1F) as u8;
                 let value = reg!(emu.arm9, op_reg);
-                let op = if SET_FLAGS && !OP_TY.sets_carry() {
+                let op = if SET_FLAGS && !DpOpTy::from_u8(OP_TY).sets_carry() {
                     match shift_ty {
                         ShiftTy::Lsl => {
                             shifts::lsl_imm_s(&mut emu.arm9.engine_data.regs, value, shift)
@@ -84,7 +84,7 @@ pub fn dp_op<const OP_TY: DpOpTy, const OPERAND: DpOperand, const SET_FLAGS: boo
                 (src, op)
             } else {
                 let shift_reg = (instr >> 8 & 0xF) as u8;
-                if OP_TY.is_unary() {
+                if DpOpTy::from_u8(OP_TY).is_unary() {
                     apply_reg_interlocks_2::<1, false>(emu, op_reg, shift_reg);
                 } else {
                     apply_reg_interlocks_3::<1, false>(emu, src_reg, op_reg, shift_reg);
@@ -94,7 +94,7 @@ pub fn dp_op<const OP_TY: DpOpTy, const OPERAND: DpOperand, const SET_FLAGS: boo
                 prefetch_arm::<true, true>(emu);
                 add_cycles(emu, 1);
                 let value = reg!(emu.arm9, op_reg);
-                let op = if SET_FLAGS && !OP_TY.sets_carry() {
+                let op = if SET_FLAGS && !DpOpTy::from_u8(OP_TY).sets_carry() {
                     match shift_ty {
                         ShiftTy::Lsl => {
                             shifts::lsl_reg_s(&mut emu.arm9.engine_data.regs, value, shift)
@@ -122,7 +122,7 @@ pub fn dp_op<const OP_TY: DpOpTy, const OPERAND: DpOperand, const SET_FLAGS: boo
         }
     };
 
-    let result = match OP_TY {
+    let result = match DpOpTy::from_u8(OP_TY) {
         DpOpTy::And => {
             if SET_FLAGS {
                 bit_ops::and_s(&mut emu.arm9.engine_data.regs, src, op)
@@ -239,7 +239,7 @@ pub fn dp_op<const OP_TY: DpOpTy, const OPERAND: DpOperand, const SET_FLAGS: boo
         }
     };
     let dst_reg = (instr >> 12 & 0xF) as u8;
-    if OP_TY.is_test() {
+    if DpOpTy::from_u8(OP_TY).is_test() {
         if unlikely(cfg!(feature = "interp-r15-write-checks") && dst_reg == 15) {
             // If the operation is a test, r15 doesn't get written and the pipeline does not get
             // reloaded, but the SPSR is still restored
@@ -249,7 +249,7 @@ pub fn dp_op<const OP_TY: DpOpTy, const OPERAND: DpOperand, const SET_FLAGS: boo
         write_reg_clear_interlock_ab(emu, dst_reg, result);
         if dst_reg == 15 {
             if !matches!(
-                OPERAND,
+                DpOperand::from_u8(OPERAND),
                 DpOperand::Reg {
                     shift_imm: false,
                     ..
@@ -259,9 +259,9 @@ pub fn dp_op<const OP_TY: DpOpTy, const OPERAND: DpOperand, const SET_FLAGS: boo
             }
             if SET_FLAGS {
                 restore_spsr(emu);
-                reload_pipeline::<{ StateSource::Cpsr }>(emu);
+                reload_pipeline::<{ StateSource::Cpsr as u8 }>(emu);
             } else {
-                reload_pipeline::<{ StateSource::Arm }>(emu);
+                reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
             }
         }
     }

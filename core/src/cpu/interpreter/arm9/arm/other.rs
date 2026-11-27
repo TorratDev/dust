@@ -4,6 +4,7 @@ use super::super::{
     return_from_hle_irq, set_cpsr_update_control, write_reg_clear_interlock_ab,
     write_reg_interlock, StateSource,
 };
+use crate::utils::{likely, unlikely};
 use crate::{
     cpu::{
         arm9::{bus, cp15::Cp15},
@@ -15,7 +16,6 @@ use crate::{
     dldi,
     emu::Emu,
 };
-use core::intrinsics::{likely, unlikely};
 
 pub fn mrs<const SPSR: bool>(emu: &mut Emu<Interpreter>, instr: u32) {
     let result = if SPSR {
@@ -117,7 +117,7 @@ pub fn undefined<const MAYBE_HLE_BIOS_SWI: bool, const MAYBE_DLDI_CALL: bool>(
                 [reg!(emu.arm9, 0), reg!(emu.arm9, 1), reg!(emu.arm9, 2)],
             ) as u32;
             reg!(emu.arm9, 15) = reg!(emu.arm9, 14);
-            reload_pipeline::<{ StateSource::R15Bit0 }>(emu);
+            reload_pipeline::<{ StateSource::R15Bit0 as u8 }>(emu);
             return;
         }
     }

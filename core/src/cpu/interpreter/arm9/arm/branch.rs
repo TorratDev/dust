@@ -16,7 +16,7 @@ pub fn b<const LINK: bool>(emu: &mut Emu<Interpreter>, instr: u32) {
     add_bus_cycles(emu, 2);
     prefetch_arm::<true, false>(emu);
     reg!(emu.arm9, 15) = branch_addr;
-    reload_pipeline::<{ StateSource::Arm }>(emu);
+    reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
 }
 
 pub fn bx<const LINK: bool>(emu: &mut Emu<Interpreter>, instr: u32) {
@@ -29,7 +29,7 @@ pub fn bx<const LINK: bool>(emu: &mut Emu<Interpreter>, instr: u32) {
     }
     prefetch_arm::<true, false>(emu);
     reg!(emu.arm9, 15) = branch_addr;
-    reload_pipeline::<{ StateSource::R15Bit0 }>(emu);
+    reload_pipeline::<{ StateSource::R15Bit0 as u8 }>(emu);
 }
 
 pub fn blx_imm(emu: &mut Emu<Interpreter>, instr: u32) {
@@ -44,5 +44,5 @@ pub fn blx_imm(emu: &mut Emu<Interpreter>, instr: u32) {
         emu.arm9.engine_data.r15_increment = 2;
     }
     reg!(emu.arm9, 15) = branch_addr;
-    reload_pipeline::<{ StateSource::Thumb }>(emu);
+    reload_pipeline::<{ StateSource::Thumb as u8 }>(emu);
 }

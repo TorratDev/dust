@@ -3,6 +3,7 @@ use super::super::{
     apply_reg_interlocks_3, can_read, can_write, handle_data_abort, prefetch_thumb,
     reload_pipeline, write_reg_interlock,
 };
+use crate::utils::unlikely;
 use crate::{
     cpu::{
         arm9::bus,
@@ -12,7 +13,6 @@ use crate::{
     emu::Emu,
     utils::schedule::RawTimestamp,
 };
-use core::intrinsics::unlikely;
 
 // TODO: Find out timing for register offsets. ARM single data transfers have an additional
 //       internal cycle for address calculation when using scaled register offsets, but maybe that
@@ -463,9 +463,9 @@ pub fn pop<const POP_R15: bool>(emu: &mut Emu<Interpreter>, instr: u16) {
         cur_addr = cur_addr.wrapping_add(4);
         reg!(emu.arm9, 15) = result;
         if emu.arm9.cp15.control().t_bit_load_disabled() {
-            reload_pipeline::<{ StateSource::Thumb }>(emu);
+            reload_pipeline::<{ StateSource::Thumb as u8 }>(emu);
         } else {
-            reload_pipeline::<{ StateSource::R15Bit0 }>(emu);
+            reload_pipeline::<{ StateSource::R15Bit0 as u8 }>(emu);
         }
     } else {
         emu.arm9.engine_data.data_cycles = data_cycles;

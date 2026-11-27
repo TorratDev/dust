@@ -1,5 +1,5 @@
-use core::simd::{f64x4, num::SimdUint};
 use dust_core::gpu::engine_3d::Color;
+use dust_core::utils::simd::f64x4;
 
 #[inline]
 pub fn round_up_to_alignment(size: usize, alignment: usize) -> usize {

@@ -6,9 +6,9 @@ publish = false
 
 [dependencies]
 dust-core = { path = "../../core" }
-emu-utils = { git = "https://github.com/kelpsyberry/emu-utils", features = ["triple-buffer", "app"] }
+emu-utils = { path = "../../utils/emu-utils", features = ["triple-buffer", "app"] }
 dust-soft-2d-base = { path = "../soft-2d/base" }
-proc-bitfield = { version = "0.5", features = ["nightly"] }
+proc-bitfield = "0.5"
 wgpu = "23.0"
 crossbeam-channel = "0.5"
 parking_lot = "0.12"

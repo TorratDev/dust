@@ -181,65 +181,65 @@ impl<E: Engine> Arm9<E> {
 
     cfg_if::cfg_if! {
         if #[cfg(any(feature = "debugger-hooks", doc))] {
-            #[doc(cfg(feature = "debugger-hooks"))]
+            #[cfg_attr(docsrs, doc(cfg(feature = "debugger-hooks")))]
             #[inline]
             pub fn swi_hook(&self) -> &Option<debug::SwiHook<E>> {
                 &self.debug.swi_hook
             }
 
-            #[doc(cfg(feature = "debugger-hooks"))]
+            #[cfg_attr(docsrs, doc(cfg(feature = "debugger-hooks")))]
             #[inline]
             pub fn set_swi_hook(&mut self, value: Option<debug::SwiHook<E>>) {
                 self.debug.swi_hook = value;
                 self.engine_data.set_swi_hook(&self.debug.swi_hook);
             }
 
-            #[doc(cfg(feature = "debugger-hooks"))]
+            #[cfg_attr(docsrs, doc(cfg(feature = "debugger-hooks")))]
             #[inline]
             pub fn undef_hook(&self) -> &Option<debug::UndefHook<E>> {
                 &self.debug.undef_hook
             }
 
-            #[doc(cfg(feature = "debugger-hooks"))]
+            #[cfg_attr(docsrs, doc(cfg(feature = "debugger-hooks")))]
             #[inline]
             pub fn set_undef_hook(&mut self, value: Option<debug::UndefHook<E>>) {
                 self.debug.undef_hook = value;
                 self.engine_data.set_undef_hook(&self.debug.undef_hook);
             }
 
-            #[doc(cfg(feature = "debugger-hooks"))]
+            #[cfg_attr(docsrs, doc(cfg(feature = "debugger-hooks")))]
             #[inline]
             pub fn prefetch_abort_hook(&self) -> &Option<debug::PrefetchAbortHook<E>> {
                 &self.debug.prefetch_abort_hook
             }
 
-            #[doc(cfg(feature = "debugger-hooks"))]
+            #[cfg_attr(docsrs, doc(cfg(feature = "debugger-hooks")))]
             #[inline]
             pub fn set_prefetch_abort_hook(&mut self, value: Option<debug::PrefetchAbortHook<E>>) {
                 self.debug.prefetch_abort_hook = value;
                 self.engine_data.set_prefetch_abort_hook(&self.debug.prefetch_abort_hook);
             }
 
-            #[doc(cfg(feature = "debugger-hooks"))]
+            #[cfg_attr(docsrs, doc(cfg(feature = "debugger-hooks")))]
             #[inline]
             pub fn data_abort_hook(&self) -> &Option<debug::DataAbortHook<E>> {
                 &self.debug.data_abort_hook
             }
 
-            #[doc(cfg(feature = "debugger-hooks"))]
+            #[cfg_attr(docsrs, doc(cfg(feature = "debugger-hooks")))]
             #[inline]
             pub fn set_data_abort_hook(&mut self, value: Option<debug::DataAbortHook<E>>) {
                 self.debug.data_abort_hook = value;
                 self.engine_data.set_data_abort_hook(&self.debug.data_abort_hook);
             }
 
-            #[doc(cfg(feature = "debugger-hooks"))]
+            #[cfg_attr(docsrs, doc(cfg(feature = "debugger-hooks")))]
             #[inline]
             pub fn breakpoints(&self) -> &[u32] {
                 &self.debug.breakpoints
             }
 
-            #[doc(cfg(feature = "debugger-hooks"))]
+            #[cfg_attr(docsrs, doc(cfg(feature = "debugger-hooks")))]
             #[inline]
             pub fn add_breakpoint(&mut self, addr: u32) {
                 if let Err(i) = self.debug.breakpoints.binary_search(&addr) {
@@ -248,7 +248,7 @@ impl<E: Engine> Arm9<E> {
                 }
             }
 
-            #[doc(cfg(feature = "debugger-hooks"))]
+            #[cfg_attr(docsrs, doc(cfg(feature = "debugger-hooks")))]
             #[inline]
             pub fn remove_breakpoint(&mut self, addr: u32) {
                 if let Ok(i) = self.debug.breakpoints.binary_search(&addr) {
@@ -257,46 +257,46 @@ impl<E: Engine> Arm9<E> {
                 }
             }
 
-            #[doc(cfg(feature = "debugger-hooks"))]
+            #[cfg_attr(docsrs, doc(cfg(feature = "debugger-hooks")))]
             #[inline]
             pub fn clear_breakpoints(&mut self) {
                 self.debug.breakpoints.clear();
                 self.engine_data.clear_breakpoints();
             }
 
-            #[doc(cfg(feature = "debugger-hooks"))]
+            #[cfg_attr(docsrs, doc(cfg(feature = "debugger-hooks")))]
             #[inline]
             pub fn breakpoint_hook(&self) -> &Option<debug::BreakpointHook<E>> {
                 &self.debug.breakpoint_hook
             }
 
-            #[doc(cfg(feature = "debugger-hooks"))]
+            #[cfg_attr(docsrs, doc(cfg(feature = "debugger-hooks")))]
             #[inline]
             pub fn set_breakpoint_hook(&mut self, value: Option<debug::BreakpointHook<E>>) {
                 self.debug.breakpoint_hook = value;
                 self.engine_data.set_breakpoint_hook(&self.debug.breakpoint_hook);
             }
 
-            #[doc(cfg(feature = "debugger-hooks"))]
+            #[cfg_attr(docsrs, doc(cfg(feature = "debugger-hooks")))]
             #[inline]
             pub fn mem_watchpoint_hook(&self) -> &Option<debug::MemWatchpointHook<E>> {
                 &self.debug.mem_watchpoint_hook
             }
 
-            #[doc(cfg(feature = "debugger-hooks"))]
+            #[cfg_attr(docsrs, doc(cfg(feature = "debugger-hooks")))]
             #[inline]
             pub fn set_mem_watchpoint_hook(&mut self, value: Option<debug::MemWatchpointHook<E>>) {
                 self.debug.mem_watchpoint_hook = value;
                 self.engine_data.set_mem_watchpoint_hook(&self.debug.mem_watchpoint_hook);
             }
 
-            #[doc(cfg(feature = "debugger-hooks"))]
+            #[cfg_attr(docsrs, doc(cfg(feature = "debugger-hooks")))]
             #[inline]
             pub fn mem_watchpoints(&self) -> &debug::MemWatchpointRootTable {
                 &self.debug.mem_watchpoints
             }
 
-            #[doc(cfg(feature = "debugger-hooks"))]
+            #[cfg_attr(docsrs, doc(cfg(feature = "debugger-hooks")))]
             #[inline]
             pub fn add_mem_watchpoint(
                 &mut self,
@@ -317,7 +317,7 @@ impl<E: Engine> Arm9<E> {
                 self.engine_data.add_mem_watchpoint(addr, size, rw);
             }
 
-            #[doc(cfg(feature = "debugger-hooks"))]
+            #[cfg_attr(docsrs, doc(cfg(feature = "debugger-hooks")))]
             #[inline]
             pub fn remove_mem_watchpoint(
                 &mut self,
@@ -374,7 +374,7 @@ impl<E: Engine> Arm9<E> {
                 }
             }
 
-            #[doc(cfg(feature = "debugger-hooks"))]
+            #[cfg_attr(docsrs, doc(cfg(feature = "debugger-hooks")))]
             #[inline]
             pub fn clear_mem_watchpoints(&mut self) {
                 self.debug.mem_watchpoints.clear();

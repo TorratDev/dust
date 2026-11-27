@@ -39,10 +39,10 @@ pub fn add_sub_reg_imm3<const SUB: bool, const IMM3: bool, const IS_MOV: bool>(
     inc_r15!(emu.arm7, 2);
 }
 
-pub fn shift_imm<const SHIFT_TY: ShiftImmTy>(emu: &mut Emu<Interpreter>, instr: u16) {
+pub fn shift_imm<const SHIFT_TY: u8>(emu: &mut Emu<Interpreter>, instr: u16) {
     let src = reg!(emu.arm7, instr >> 3 & 7);
     let shift = (instr >> 6 & 0x1F) as u8;
-    let result = match SHIFT_TY {
+    let result = match ShiftImmTy::from_u8(SHIFT_TY) {
         ShiftImmTy::Lsl => shifts::lsl_imm_s(&mut emu.arm7.engine_data.regs, src, shift),
         ShiftImmTy::Lsr => shifts::lsr_imm_s(&mut emu.arm7.engine_data.regs, src, shift),
         ShiftImmTy::Asr => shifts::asr_imm_s(&mut emu.arm7.engine_data.regs, src, shift),
@@ -52,11 +52,11 @@ pub fn shift_imm<const SHIFT_TY: ShiftImmTy>(emu: &mut Emu<Interpreter>, instr: 
     inc_r15!(emu.arm7, 2);
 }
 
-pub fn dp_op_imm8<const OP_TY: DpOpImm8Ty>(emu: &mut Emu<Interpreter>, instr: u16) {
+pub fn dp_op_imm8<const OP_TY: u8>(emu: &mut Emu<Interpreter>, instr: u16) {
     let src_dst_reg = instr >> 8 & 7;
     let op = instr as u8 as u32;
     let src = reg!(emu.arm7, src_dst_reg);
-    match OP_TY {
+    match DpOpImm8Ty::from_u8(OP_TY) {
         DpOpImm8Ty::Mov => {
             emu.arm7.engine_data.regs.cpsr = emu
                 .arm7
@@ -80,11 +80,11 @@ pub fn dp_op_imm8<const OP_TY: DpOpImm8Ty>(emu: &mut Emu<Interpreter>, instr: u1
     inc_r15!(emu.arm7, 2);
 }
 
-pub fn dp_op_reg<const OP_TY: DpOpRegTy>(emu: &mut Emu<Interpreter>, instr: u16) {
+pub fn dp_op_reg<const OP_TY: u8>(emu: &mut Emu<Interpreter>, instr: u16) {
     let src_dst_reg = instr & 7;
     let src = reg!(emu.arm7, src_dst_reg);
     let op = reg!(emu.arm7, instr >> 3 & 7);
-    match OP_TY {
+    match DpOpRegTy::from_u8(OP_TY) {
         DpOpRegTy::And => {
             let result = bit_ops::and_s(&mut emu.arm7.engine_data.regs, src, op);
             reg!(emu.arm7, src_dst_reg) = result;
@@ -166,7 +166,7 @@ pub fn add_special(emu: &mut Emu<Interpreter>, instr: u16) {
     let result = reg!(emu.arm7, src_dst_reg).wrapping_add(reg!(emu.arm7, instr >> 3 & 0xF));
     reg!(emu.arm7, src_dst_reg) = result;
     if src_dst_reg == 15 {
-        reload_pipeline::<{ StateSource::Thumb }>(emu);
+        reload_pipeline::<{ StateSource::Thumb as u8 }>(emu);
     } else {
         inc_r15!(emu.arm7, 2);
     }
@@ -184,7 +184,7 @@ pub fn mov_special(emu: &mut Emu<Interpreter>, instr: u16) {
     let op = reg!(emu.arm7, instr >> 3 & 0xF);
     reg!(emu.arm7, dst_reg) = op;
     if dst_reg == 15 {
-        reload_pipeline::<{ StateSource::Thumb }>(emu);
+        reload_pipeline::<{ StateSource::Thumb as u8 }>(emu);
     } else {
         inc_r15!(emu.arm7, 2);
     }

@@ -13,18 +13,14 @@ use crate::{
     },
     emu::{self, Emu},
     gpu::vram::Vram,
-    utils::{load_slice_in_place, schedule::RawTimestamp, store_slice, Fifo, Savestate},
-};
-use core::{
-    intrinsics::simd::simd_div,
-    mem::{replace, transmute, MaybeUninit},
-    simd::{
-        cmp::SimdOrd,
-        i32x4, i64x4,
-        num::{SimdInt, SimdUint},
-        u32x2, u64x2,
+    utils::{
+        load_slice_in_place,
+        schedule::RawTimestamp,
+        simd::{i32x4, i64x4, u32x2, u64x2},
+        store_slice, Fifo, Savestate,
     },
 };
+use core::mem::{replace, transmute, MaybeUninit};
 use matrix::{Matrix, MatrixBuffer};
 use vertex::Vertex;
 
@@ -404,13 +400,8 @@ impl Clip for i32x4 {
     #[inline]
     fn interpolate(&self, other: &Self, numer: i64, denom: i64) -> Self {
         *self
-            + unsafe {
-                // Safety: denom != 0 && numer != i64::MIN
-                simd_div(
-                    (other.cast::<i64>() - self.cast::<i64>()) * i64x4::splat(numer),
-                    i64x4::splat(denom),
-                )
-            }
+            + (((other.cast::<i64>() - self.cast::<i64>()) * i64x4::splat(numer))
+                / i64x4::splat(denom))
             .cast()
     }
     #[inline]
@@ -791,7 +782,7 @@ impl Engine3d {
         emu.gpu.engine_3d.update_gx_fifo_irq(&mut emu.arm9);
         if emu.gpu.engine_3d.gx_fifo_half_empty() {
             emu.arm9
-                .start_dma_transfers_with_timing::<{ arm9::dma::Timing::GxFifo }>();
+                .start_dma_transfers_with_timing::<{ arm9::dma::Timing::GxFifo as u8 }>();
         }
 
         let was_stalled = emu.gpu.engine_3d.gx_fifo_stalled;
@@ -1178,17 +1169,11 @@ impl Engine3d {
                     w >>= 1;
                     coords >>= 1;
                 }
-                ((unsafe {
-                    // Safety: w != 0
-                    simd_div(
-                        coords.cast::<u64>() * viewport_size,
-                        u64x2::splat((w << 1) as u64),
-                    )
-                }
+                let coords = ((coords.cast::<u64>() * viewport_size)
+                    / u64x2::splat((w << 1) as u64))
                 .cast::<u32>()
-                    + viewport_origin)
-                    & u32x2::from_array([0x1FF, 0xFF]))
-                .cast::<u16>()
+                    + viewport_origin;
+                (coords & u32x2::from_array([0x1FF, 0xFF])).cast::<u16>()
             };
             let y = coords[1] as u8;
             top_y = top_y.min(y);
@@ -1209,17 +1194,11 @@ impl Engine3d {
                         w >>= 1;
                         coords >>= 1;
                     }
-                    ((unsafe {
-                        // Safety: w != 0
-                        simd_div(
-                            (coords.cast::<u64>() << 4) * viewport_size,
-                            u64x2::splat((w << 1) as u64),
-                        )
-                    }
+                    let coords = (((coords.cast::<u64>() << 4) * viewport_size)
+                        / u64x2::splat((w << 1) as u64))
                     .cast::<u32>()
-                        + (viewport_origin << 4))
-                        & u32x2::from_array([0x1FFF, 0xFFF]))
-                    .cast::<u16>()
+                        + (viewport_origin << 4);
+                    (coords & u32x2::from_array([0x1FFF, 0xFFF])).cast::<u16>()
                 },
                 uv: vert.uv,
                 color: vert.color.cast::<u16>() << 3 | vert.color.cast::<u16>() >> 3,

@@ -1,10 +1,7 @@
 use crate::{Buffers, RenderingData};
-use core::{
-    arch::x86_64::*,
-    mem::transmute,
-    simd::{u32x8, u64x4},
-};
+use core::{arch::x86_64::*, mem::transmute};
 use dust_core::gpu::{Scanline, SCREEN_WIDTH};
+use dust_core::utils::simd::{u32x8, u64x4};
 
 type BlendData = ([__m256i; 3], [__m256i; 3], [__m256i; 3]);
 

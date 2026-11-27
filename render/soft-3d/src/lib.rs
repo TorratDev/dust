@@ -1,11 +1,9 @@
-#![feature(portable_simd)]
 #![warn(clippy::all)]
 
 mod data;
 pub use data::RenderingData;
 mod utils;
 
-use core::simd::{cmp::SimdOrd, num::SimdUint};
 use dust_core::{
     gpu::{
         engine_3d::{
@@ -307,11 +305,9 @@ fn process_pixel<const FORMAT: u8, const MODE: u8>(
                 }
             },
 
-            _ => {
-                ((tex_color + InterpColor::splat(1)) * (vert_blend_color + InterpColor::splat(1))
-                    - InterpColor::splat(1))
-                    >> InterpColor::from_array([6, 6, 6, 5])
-            }
+            _ => ((tex_color + InterpColor::splat(1)) * (vert_blend_color + InterpColor::splat(1))
+                - InterpColor::splat(1))
+            .shr_lanes(InterpColor::from_array([6, 6, 6, 5])),
         }
     };
 

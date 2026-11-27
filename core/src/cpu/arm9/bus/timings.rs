@@ -32,8 +32,8 @@ impl Timings {
     }
 
     pub fn set_range(&mut self, cycles: Cycles, (lower_bound, upper_bound): (u32, u32)) {
-        debug_assert!(lower_bound & Self::PAGE_MASK == 0);
-        debug_assert!(upper_bound & Self::PAGE_MASK == Self::PAGE_MASK);
+        debug_assert_eq!(lower_bound & Self::PAGE_MASK, 0);
+        debug_assert_eq!(upper_bound & Self::PAGE_MASK, Self::PAGE_MASK);
         let lower_bound = (lower_bound >> Self::PAGE_SHIFT) as usize;
         let upper_bound = (upper_bound >> Self::PAGE_SHIFT) as usize;
         self.0[lower_bound..=upper_bound].fill(cycles);
@@ -45,15 +45,13 @@ impl Timings {
         //   same as the BIOS region's.
         // - GBA slot
 
-        for cycles in &mut self.0 {
-            *cycles = Cycles {
-                n32_data: 8,
-                s32_data: 2,
-                n16_data: 8,
-                s16_data: 2,
-                code: 8,
-            };
-        }
+        self.0.fill(Cycles {
+            n32_data: 8,
+            s32_data: 2,
+            n16_data: 8,
+            s16_data: 2,
+            code: 8,
+        });
 
         // Main RAM
         self.set_range(

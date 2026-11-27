@@ -305,14 +305,12 @@ impl super::RomDevice for Normal {
                         // }
                     }
 
-                    0xB8 => {
-                        if cmd.read_be::<u64>(0) & 0x00FF_FFFF_FFFF_FFFF == 0 {
-                            let chip_id = self.chip_id;
-                            for i in (0..output_len.get() as usize).step_by(4) {
-                                output.write_le(i, chip_id);
-                            }
-                            return;
+                    0xB8 if cmd.read_be::<u64>(0) & 0x00FF_FFFF_FFFF_FFFF == 0 => {
+                        let chip_id = self.chip_id;
+                        for i in (0..output_len.get() as usize).step_by(4) {
+                            output.write_le(i, chip_id);
                         }
+                        return;
                     }
 
                     _ => {}

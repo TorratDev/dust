@@ -41,14 +41,37 @@ impl<Idx> From<RangeInclusive<Idx>> for (Idx, Idx) {
     }
 }
 
-impl<Idx> IntoIterator for RangeInclusive<Idx>
-where
-    Idx: iter::Step,
-{
-    type IntoIter = ops::RangeInclusive<Idx>;
+pub trait RangeIndex: Copy {
+    fn into_u64(self) -> u64;
+    fn from_u64(value: u64) -> Self;
+}
+
+impl RangeIndex for u32 {
+    fn into_u64(self) -> u64 {
+        u64::from(self)
+    }
+
+    fn from_u64(value: u64) -> Self {
+        value as u32
+    }
+}
+
+impl RangeIndex for u64 {
+    fn into_u64(self) -> u64 {
+        self
+    }
+
+    fn from_u64(value: u64) -> Self {
+        value
+    }
+}
+
+impl<Idx: RangeIndex> IntoIterator for RangeInclusive<Idx> {
+    type IntoIter = iter::Map<ops::RangeInclusive<u64>, fn(u64) -> Idx>;
     type Item = Idx;
+
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
-        self.start..=self.end
+        (self.start.into_u64()..=self.end.into_u64()).map(Idx::from_u64)
     }
 }

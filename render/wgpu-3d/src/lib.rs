@@ -1,4 +1,3 @@
-#![feature(portable_simd)]
 #![warn(clippy::all)]
 #![allow(clippy::manual_div_ceil)]
 
@@ -12,7 +11,6 @@ mod utils;
 use ahash::AHashMap as HashMap;
 use core::{
     mem::{self, MaybeUninit},
-    simd::num::SimdUint,
     slice,
 };
 use dust_core::{

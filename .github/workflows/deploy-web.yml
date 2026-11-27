@@ -14,6 +14,9 @@ jobs:
   deploy:
     name: Deploy
     runs-on: ubuntu-latest
+    env:
+      # The browser build requires rebuilding std with wasm atomics for shared memory.
+      RUSTUP_TOOLCHAIN: nightly
 
     steps:
     - uses: actions/checkout@v4

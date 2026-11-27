@@ -1,14 +1,14 @@
 use super::super::{common::ThumbLoadStoreTy, Context};
 use core::fmt::Write;
 
-pub(super) fn ldr_str<const TY: ThumbLoadStoreTy, const IMM_OFFSET_SHIFT: u8, const IMM: bool>(
+pub(super) fn ldr_str<const TY: u8, const IMM_OFFSET_SHIFT: u8, const IMM: bool>(
     ctx: &mut Context,
     instr: u16,
 ) {
     ctx.branch_addr_base = None;
     let src_dst_reg = instr & 7;
     let base_reg = instr >> 3 & 7;
-    let opcode = match TY {
+    let opcode = match ThumbLoadStoreTy::from_u8(TY) {
         ThumbLoadStoreTy::Str => "str",
         ThumbLoadStoreTy::Strh => "strh",
         ThumbLoadStoreTy::Strb => "strb",
