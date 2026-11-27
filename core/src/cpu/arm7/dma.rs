@@ -9,9 +9,8 @@ use crate::{
     emu::Emu,
     utils::{schedule::RawTimestamp, Savestate},
 };
-use core::marker::ConstParamTy;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ConstParamTy, Savestate)]
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Savestate)]
 pub enum Timing {
     Immediate, // x
     VBlank,    // x
@@ -19,6 +18,20 @@ pub enum Timing {
     WiFi,      // -
     GbaSlot,   // -
     Disabled,
+}
+
+impl Timing {
+    pub const fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Immediate,
+            1 => Self::VBlank,
+            2 => Self::DsSlot,
+            3 => Self::WiFi,
+            4 => Self::GbaSlot,
+            5 => Self::Disabled,
+            _ => unreachable!(),
+        }
+    }
 }
 
 impl<E: Engine> Arm7<E> {
@@ -108,9 +121,9 @@ impl<E: Engine> Arm7<E> {
         }
     }
 
-    pub(crate) fn start_dma_transfers_with_timing<const TIMING: Timing>(&mut self) {
+    pub(crate) fn start_dma_transfers_with_timing<const TIMING: u8>(&mut self) {
         for i in 0..4 {
-            if self.dma.channels[i as usize].timing == TIMING {
+            if self.dma.channels[i as usize].timing == Timing::from_u8(TIMING) {
                 self.start_dma_transfer::<false>(Index::new(i));
             }
         }

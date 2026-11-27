@@ -1,7 +1,6 @@
 pub use super::super::engines_common::*;
 
 use crate::cpu::psr::Psr;
-use core::marker::ConstParamTy;
 
 static COND_TABLE: [u16; 0x10] = [
     0xF0F0, // EQ    (z)
@@ -33,12 +32,25 @@ impl Psr {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, ConstParamTy, Debug)]
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum StateSource {
     Arm,
     Thumb,
     R15Bit0,
     Cpsr,
+}
+
+impl StateSource {
+    pub const fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Arm,
+            1 => Self::Thumb,
+            2 => Self::R15Bit0,
+            3 => Self::Cpsr,
+            _ => unreachable!(),
+        }
+    }
 }
 
 cfg_if::cfg_if! {

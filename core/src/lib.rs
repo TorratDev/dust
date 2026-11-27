@@ -1,15 +1,5 @@
-#![feature(
-    core_intrinsics,
-    adt_const_params,
-    doc_cfg,
-    portable_simd,
-    str_from_utf16_endian,
-    rustc_attrs
-)]
 #![warn(clippy::pedantic)]
 #![allow(
-    incomplete_features,
-    internal_features,
     clippy::cast_lossless,
     clippy::cast_sign_loss,
     clippy::cast_possible_wrap,

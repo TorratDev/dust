@@ -74,10 +74,10 @@ fn add_cycles(emu: &mut Emu<Interpreter>, cycles: RawTimestamp) {
         .set_cur_time(emu.arm7.schedule.cur_time() + Timestamp(cycles));
 }
 
-fn reload_pipeline<const STATE_SOURCE: StateSource>(emu: &mut Emu<Interpreter>) {
+fn reload_pipeline<const STATE_SOURCE: u8>(emu: &mut Emu<Interpreter>) {
     let mut addr = reg!(emu.arm7, 15);
 
-    if match STATE_SOURCE {
+    if match StateSource::from_u8(STATE_SOURCE) {
         StateSource::Arm => false,
         StateSource::Thumb => true,
         StateSource::R15Bit0 => {
@@ -218,7 +218,7 @@ fn handle_undefined<const THUMB: bool>(emu: &mut Emu<Interpreter>, _instr: u32) 
     emu.arm7.engine_data.regs.spsr = prev_cpsr;
     reg!(emu.arm7, 14) = reg!(emu.arm7, 15).wrapping_sub(4 >> THUMB as u8);
     reg!(emu.arm7, 15) = 0x0000_0004;
-    reload_pipeline::<{ StateSource::Arm }>(emu);
+    reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
 }
 
 fn handle_swi<const THUMB: bool>(emu: &mut Emu<Interpreter>, number: u8) {
@@ -259,7 +259,7 @@ fn handle_swi<const THUMB: bool>(emu: &mut Emu<Interpreter>, number: u8) {
     emu.arm7.engine_data.regs.spsr = prev_cpsr;
     reg!(emu.arm7, 14) = reg!(emu.arm7, 15).wrapping_sub(4 >> THUMB as u8);
     reg!(emu.arm7, 15) = 0x0000_0008;
-    reload_pipeline::<{ StateSource::Arm }>(emu);
+    reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
 }
 
 fn enter_hle_swi<const FROM_USER_CODE: bool>(
@@ -341,7 +341,7 @@ fn return_from_hle_swi(emu: &mut Emu<Interpreter>) {
 
     reg!(emu.arm7, 15) = reg!(emu.arm7, 14);
     restore_spsr(emu);
-    reload_pipeline::<{ StateSource::Cpsr }>(emu);
+    reload_pipeline::<{ StateSource::Cpsr as u8 }>(emu);
 }
 
 fn enter_hle_irq<const FROM_USER_CODE: bool>(emu: &mut Emu<Interpreter>, return_addr: u32) {
@@ -379,7 +379,7 @@ fn return_from_hle_irq(emu: &mut Emu<Interpreter>) {
     }
     reg!(emu.arm7, 15) = reg!(emu.arm7, 14).wrapping_sub(4);
     restore_spsr(emu);
-    reload_pipeline::<{ StateSource::Cpsr }>(emu);
+    reload_pipeline::<{ StateSource::Cpsr as u8 }>(emu);
 }
 
 impl CoreData for EngineData {
@@ -387,7 +387,7 @@ impl CoreData for EngineData {
 
     fn setup(emu: &mut Emu<Interpreter>) {
         reg!(emu.arm7, 15) = 0;
-        reload_pipeline::<{ StateSource::Arm }>(emu);
+        reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
     }
 
     fn setup_direct_boot(emu: &mut Emu<Interpreter>, entry_addr: u32) {
@@ -407,7 +407,7 @@ impl CoreData for EngineData {
         emu.arm7.engine_data.regs.r13_14_svc[0] = 0x0380_FFC0;
         emu.arm7.engine_data.prefetch_nseq = true;
         reg!(emu.arm7, 15) = entry_addr;
-        reload_pipeline::<{ StateSource::R15Bit0 }>(emu);
+        reload_pipeline::<{ StateSource::R15Bit0 as u8 }>(emu);
     }
 
     #[inline]
@@ -428,7 +428,7 @@ impl CoreData for EngineData {
     #[inline]
     fn jump(emu: &mut Emu<Interpreter>, addr: u32) {
         reg!(emu.arm7, 15) = addr;
-        reload_pipeline::<{ StateSource::R15Bit0 }>(emu);
+        reload_pipeline::<{ StateSource::R15Bit0 as u8 }>(emu);
     }
 
     #[inline]
@@ -461,14 +461,14 @@ impl CoreData for EngineData {
         emu.arm7.engine_data.regs.set_from_engine_regs(regs);
         reg!(emu.arm7, 15) = reg!(emu.arm7, 15)
             .wrapping_sub(8 >> emu.arm7.engine_data.regs.cpsr.thumb_state() as u8);
-        reload_pipeline::<{ StateSource::Cpsr }>(emu);
+        reload_pipeline::<{ StateSource::Cpsr as u8 }>(emu);
     }
 
     #[inline]
     fn jump_and_link(emu: &mut Emu<Interpreter>, addr: u32, lr: u32) {
         reg!(emu.arm7, 14) = lr;
         reg!(emu.arm7, 15) = addr;
-        reload_pipeline::<{ StateSource::R15Bit0 }>(emu);
+        reload_pipeline::<{ StateSource::R15Bit0 as u8 }>(emu);
     }
 
     #[inline]
@@ -605,7 +605,7 @@ impl Arm7Data for EngineData {
                     emu.arm7.engine_data.regs.spsr = prev_cpsr;
                     reg!(emu.arm7, 14) = return_addr;
                     reg!(emu.arm7, 15) = 0x0000_0018;
-                    reload_pipeline::<{ StateSource::Arm }>(emu);
+                    reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
                 }
             } else if emu.arm7.irqs.halted() {
                 emu.arm7

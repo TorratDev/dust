@@ -65,8 +65,8 @@ impl PermMap {
     }
 
     pub(super) fn set_range(&mut self, perms: Perms, (lower_bound, upper_bound): (u32, u32)) {
-        debug_assert!(lower_bound & Self::PAGE_MASK == 0);
-        debug_assert!(upper_bound & Self::PAGE_MASK == Self::PAGE_MASK);
+        debug_assert_eq!(lower_bound & Self::PAGE_MASK, 0);
+        debug_assert_eq!(upper_bound & Self::PAGE_MASK, Self::PAGE_MASK);
         let lower_bound = (lower_bound >> Self::PAGE_SHIFT) as usize;
         let upper_bound = (upper_bound >> Self::PAGE_SHIFT) as usize;
         self.0[lower_bound..=upper_bound].fill(perms);

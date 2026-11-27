@@ -4,7 +4,7 @@ use super::super::{
 };
 use core::fmt::Write;
 
-pub(super) fn dp_op<const OP_TY: DpOpTy, const OPERAND: DpOperand, const SET_FLAGS: bool>(
+pub(super) fn dp_op<const OP_TY: u8, const OPERAND: u8, const SET_FLAGS: bool>(
     ctx: &mut Context,
     instr: u32,
     cond: &'static str,
@@ -13,7 +13,7 @@ pub(super) fn dp_op<const OP_TY: DpOpTy, const OPERAND: DpOperand, const SET_FLA
     let src_reg = instr >> 16 & 0xF;
     ctx.next_instr.opcode = format!(
         "{}{}{} ",
-        match OP_TY {
+        match DpOpTy::from_u8(OP_TY) {
             DpOpTy::And => "and",
             DpOpTy::Eor => "eor",
             DpOpTy::Sub => "sub",
@@ -32,19 +32,19 @@ pub(super) fn dp_op<const OP_TY: DpOpTy, const OPERAND: DpOperand, const SET_FLA
             DpOpTy::Mvn => "mvn",
         },
         cond,
-        if SET_FLAGS && !OP_TY.is_test() {
+        if SET_FLAGS && !DpOpTy::from_u8(OP_TY).is_test() {
             "s"
         } else {
             ""
         }
     );
-    if !OP_TY.is_test() {
+    if !DpOpTy::from_u8(OP_TY).is_test() {
         let _ = write!(ctx.next_instr.opcode, "r{dst_reg}, ");
     }
-    if !OP_TY.is_unary() {
+    if !DpOpTy::from_u8(OP_TY).is_unary() {
         let _ = write!(ctx.next_instr.opcode, "r{src_reg}, ");
     }
-    match OPERAND {
+    match DpOperand::from_u8(OPERAND) {
         DpOperand::Imm => {
             let value = instr & 0xFF;
             let shift = instr >> 7 & 0x1E;
@@ -100,7 +100,7 @@ pub(super) fn dp_op<const OP_TY: DpOpTy, const OPERAND: DpOperand, const SET_FLA
             }
         }
     }
-    if OP_TY.is_test() && dst_reg != 0 {
+    if DpOpTy::from_u8(OP_TY).is_test() && dst_reg != 0 {
         "Unpredictable".clone_into(&mut ctx.next_instr.comment);
     }
 }

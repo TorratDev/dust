@@ -1101,7 +1101,6 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 [[package]]
 name = "emu-utils"
 version = "0.0.0"
-source = "git+https://github.com/kelpsyberry/emu-utils#fff4bcd769b2fd1b452d79aad7d7741589e64c0a"
 dependencies = [
  "cfg-if",
  "cocoa 0.25.0",
@@ -1112,7 +1111,6 @@ dependencies = [
 [[package]]
 name = "emu-utils-macros"
 version = "0.0.0"
-source = "git+https://github.com/kelpsyberry/emu-utils#fff4bcd769b2fd1b452d79aad7d7741589e64c0a"
 dependencies = [
  "proc-macro2",
  "quote",

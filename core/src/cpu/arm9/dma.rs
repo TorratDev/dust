@@ -10,10 +10,10 @@ use crate::{
     gpu::engine_3d::Engine3d,
     utils::{schedule::RawTimestamp, Savestate},
 };
-use core::{marker::ConstParamTy, mem::transmute};
+use core::mem::transmute;
 
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ConstParamTy, Savestate)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Savestate)]
 pub enum Timing {
     Immediate,    // x
     VBlank,       // x
@@ -24,6 +24,23 @@ pub enum Timing {
     GbaSlot,      // -
     GxFifo,       // x
     Disabled,
+}
+
+impl Timing {
+    pub const fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Immediate,
+            1 => Self::VBlank,
+            2 => Self::HBlank,
+            3 => Self::DisplayStart,
+            4 => Self::DisplayFifo,
+            5 => Self::DsSlot,
+            6 => Self::GbaSlot,
+            7 => Self::GxFifo,
+            8 => Self::Disabled,
+            _ => unreachable!(),
+        }
+    }
 }
 
 impl<E: Engine> Arm9<E> {
@@ -93,19 +110,16 @@ impl<E: Engine> Arm9<E> {
         }
 
         if channel.timing == Timing::Immediate {
-            self.start_dma_transfer::<true, { Timing::Immediate }>(i);
+            self.start_dma_transfer::<true, { Timing::Immediate as u8 }>(i);
         } else if channel.timing == Timing::GxFifo && engine_3d.gx_fifo_half_empty() {
-            self.start_dma_transfer::<true, { Timing::GxFifo }>(i);
+            self.start_dma_transfer::<true, { Timing::GxFifo as u8 }>(i);
         }
     }
 
-    fn start_dma_transfer<const NEED_SCHED_UPDATE: bool, const TIMING: Timing>(
-        &mut self,
-        i: Index,
-    ) {
+    fn start_dma_transfer<const NEED_SCHED_UPDATE: bool, const TIMING: u8>(&mut self, i: Index) {
         let channel = &mut self.dma.channels[i.get() as usize];
         channel.next_access_is_nseq = true;
-        if TIMING == Timing::GxFifo {
+        if Timing::from_u8(TIMING) == Timing::GxFifo {
             channel.remaining_batch_units = channel
                 .remaining_units
                 .min(112 << channel.control.is_32_bit() as u8);
@@ -124,10 +138,11 @@ impl<E: Engine> Arm9<E> {
         }
     }
 
-    pub(crate) fn start_dma_transfers_with_timing<const TIMING: Timing>(&mut self) {
+    pub(crate) fn start_dma_transfers_with_timing<const TIMING: u8>(&mut self) {
         for i in 0..4 {
             let channel = &mut self.dma.channels[i as usize];
-            if channel.timing == TIMING && self.dma.running_channels & 1 << i == 0 {
+            if channel.timing == Timing::from_u8(TIMING) && self.dma.running_channels & 1 << i == 0
+            {
                 self.start_dma_transfer::<false, TIMING>(Index::new(i));
             }
         }

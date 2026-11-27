@@ -267,7 +267,7 @@ impl Gpu {
         if emu.gpu.vcount < SCREEN_HEIGHT as u16 {
             if emu.gpu.power_control.display_enabled() {
                 emu.arm9
-                    .start_dma_transfers_with_timing::<{ arm9::dma::Timing::HBlank }>();
+                    .start_dma_transfers_with_timing::<{ arm9::dma::Timing::HBlank as u8 }>();
             }
             if emu.gpu.cur_scanline < SCREEN_HEIGHT as u32 {
                 emu.gpu.renderer_2d.finish_scanline(
@@ -375,9 +375,9 @@ impl Gpu {
                         .write_requested(emu.arm9.irqs.requested().with_vblank(true), ());
                 }
                 emu.arm7
-                    .start_dma_transfers_with_timing::<{ arm7::dma::Timing::VBlank }>();
+                    .start_dma_transfers_with_timing::<{ arm7::dma::Timing::VBlank as u8 }>();
                 emu.arm9
-                    .start_dma_transfers_with_timing::<{ arm9::dma::Timing::VBlank }>();
+                    .start_dma_transfers_with_timing::<{ arm9::dma::Timing::VBlank as u8 }>();
             }
         } else if emu.gpu.vcount == (TOTAL_SCANLINES - 48) as u16 {
             emu.gpu.engine_3d.start_rendering(&emu.gpu.vram);

@@ -1,5 +1,7 @@
 [workspace]
 members = [
+    "utils/emu-utils",
+    "utils/emu-utils/macros",
     "core",
     "render/soft-2d/base",
     "render/soft-2d",

@@ -80,14 +80,16 @@ impl Ptrs {
 
     #[cfg(feature = "bft-r")]
     pub fn disable_read(&mut self, addr: u32, flags: RDisableFlags) {
-        debug_assert!(flags != 0 && flags & !r_disable_flags::ALL == 0);
+        debug_assert_ne!(flags, 0);
+        debug_assert_eq!(flags & !r_disable_flags::ALL, 0);
         let i = (addr >> Self::PAGE_SHIFT) as usize;
         self.attrs[i] = (self.attrs[i] & !mask::R) | flags << attrs::R_DISABLE_START;
     }
 
     #[cfg(feature = "bft-r")]
     pub fn enable_read(&mut self, addr: u32, flags: RDisableFlags) {
-        debug_assert!(flags != 0 && flags & !r_disable_flags::ALL == 0);
+        debug_assert_ne!(flags, 0);
+        debug_assert_eq!(flags & !r_disable_flags::ALL, 0);
         let i = (addr >> Self::PAGE_SHIFT) as usize;
         let mut attrs = self.attrs[i];
         attrs &= !(flags << attrs::R_DISABLE_START);
@@ -99,7 +101,8 @@ impl Ptrs {
 
     #[cfg(feature = "bft-r")]
     pub fn enable_read_all(&mut self, flags: RDisableFlags) {
-        debug_assert!(flags != 0 && flags & !r_disable_flags::ALL == 0);
+        debug_assert_ne!(flags, 0);
+        debug_assert_eq!(flags & !r_disable_flags::ALL, 0);
         let disable_attrs_mask = !(flags << attrs::R_DISABLE_START);
         for i in 0..Self::ENTRIES {
             let mut attrs = self.attrs[i];
@@ -113,14 +116,16 @@ impl Ptrs {
 
     #[cfg(feature = "bft-w")]
     pub fn disable_write(&mut self, addr: u32, flags: WDisableFlags) {
-        debug_assert!(flags != 0 && flags & !w_disable_flags::ALL == 0);
+        debug_assert_ne!(flags, 0);
+        debug_assert_eq!(flags & !w_disable_flags::ALL, 0);
         let i = (addr >> Self::PAGE_SHIFT) as usize;
         self.attrs[i] = (self.attrs[i] & !mask::W) | flags << attrs::W_DISABLE_START;
     }
 
     #[cfg(feature = "bft-w")]
     pub fn enable_write(&mut self, addr: u32, flags: WDisableFlags) {
-        debug_assert!(flags != 0 && flags & !w_disable_flags::ALL == 0);
+        debug_assert_ne!(flags, 0);
+        debug_assert_eq!(flags & !w_disable_flags::ALL, 0);
         let i = (addr >> Self::PAGE_SHIFT) as usize;
         let mut attrs = self.attrs[i];
         attrs &= !(flags << attrs::W_DISABLE_START);
@@ -132,7 +137,8 @@ impl Ptrs {
 
     #[cfg(feature = "bft-w")]
     pub fn enable_write_all(&mut self, flags: WDisableFlags) {
-        debug_assert!(flags != 0 && flags & !w_disable_flags::ALL == 0);
+        debug_assert_ne!(flags, 0);
+        debug_assert_eq!(flags & !w_disable_flags::ALL, 0);
         let disable_attrs_mask = !(flags << attrs::W_DISABLE_START);
         for i in 0..Self::ENTRIES {
             let mut attrs = self.attrs[i];
@@ -151,9 +157,9 @@ impl Ptrs {
         mem_size: usize,
         (lower_bound, upper_bound): (u32, u32),
     ) {
-        debug_assert!(lower_bound & Self::PAGE_MASK == 0);
-        debug_assert!(upper_bound & Self::PAGE_MASK == Self::PAGE_MASK);
-        debug_assert!(mem_size & Self::PAGE_MASK as usize == 0);
+        debug_assert_eq!(lower_bound & Self::PAGE_MASK, 0);
+        debug_assert_eq!(upper_bound & Self::PAGE_MASK, Self::PAGE_MASK);
+        debug_assert_eq!(mem_size & Self::PAGE_MASK as usize, 0);
 
         let lower_bound = (lower_bound >> Self::PAGE_SHIFT) as usize;
         let upper_bound = (upper_bound >> Self::PAGE_SHIFT) as usize;

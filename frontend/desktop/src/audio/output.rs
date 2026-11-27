@@ -138,7 +138,7 @@ impl dust_core::audio::Backend for Sender {
             } else {
                 // Overwrite the oldest samples, attempt to move the read position to the start of the
                 // oldest remaining ones
-                let _ = self.buffer.read_pos.fetch_update(
+                let _ = self.buffer.read_pos.try_update(
                     Ordering::Relaxed,
                     Ordering::Relaxed,
                     |read_pos| {
@@ -152,7 +152,7 @@ impl dust_core::audio::Backend for Sender {
             }
             for sample in samples.drain(..len) {
                 unsafe {
-                    *self.buffer.data.get_unchecked_mut(self.write_pos) = sample;
+                    *(&mut *self.buffer.data).get_unchecked_mut(self.write_pos) = sample;
                 }
                 self.write_pos = (self.write_pos + 1) & buffer_mask;
             }
@@ -189,7 +189,7 @@ impl Receiver {
         if let Ok(read_pos) =
             self.buffer
                 .read_pos
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |read_pos| {
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |read_pos| {
                     let new = (read_pos + 1) & buffer_mask;
                     if new == self.buffer.write_pos.load(Ordering::Acquire) {
                         None
@@ -198,7 +198,7 @@ impl Receiver {
                     }
                 })
         {
-            let result = unsafe { &*self.buffer.data.get_unchecked_mut(read_pos) };
+            let result = unsafe { (&*self.buffer.data).get_unchecked(read_pos) };
             #[cfg(not(feature = "xq-audio"))]
             {
                 Some([

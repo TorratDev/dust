@@ -3,6 +3,7 @@ use super::super::{
     apply_reg_interlocks_3, can_read, can_write, handle_data_abort, handle_undefined, prefetch_arm,
     reload_pipeline, restore_spsr, write_reg_clear_interlock_ab, write_reg_interlock,
 };
+use crate::utils::{likely, unlikely};
 use crate::{
     cpu::{
         arm9::bus,
@@ -17,7 +18,6 @@ use crate::{
     emu::Emu,
     utils::schedule::RawTimestamp,
 };
-use core::intrinsics::{likely, unlikely};
 
 // TODO: Check if the scaled offset additional internal cycle applies to LSL #0 too (it's assumed
 //       that it is at the moment).
@@ -37,7 +37,7 @@ macro_rules! wb_handler {
             $(, dst = $dst_reg: ident)?
         | $check: block $do_access: block
     ) => {
-        pub fn $ident<const OFF_TY: WbOffTy, const UPWARDS: bool, const $addressing: WbAddressing>(
+        pub fn $ident<const OFF_TY: u8, const UPWARDS: bool, const $addressing: u8>(
             $emu: &mut Emu<Interpreter>,
             $instr: u32,
         ) {
@@ -46,7 +46,7 @@ macro_rules! wb_handler {
 
             let base_reg = ($instr >> 16 & 0xF) as u8;
             let offset = {
-                let abs_off = match OFF_TY {
+                let abs_off = match WbOffTy::from_u8(OFF_TY) {
                     WbOffTy::Imm => {
                         $( apply_reg_interlocks_2::<0, true>($emu, base_reg, $src_reg); )*
                         $( apply_reg_interlock_1::<false>($emu, base_reg); let _ = $dst_reg; )*
@@ -83,29 +83,29 @@ macro_rules! wb_handler {
             };
 
             let base = reg!($emu.arm9, base_reg);
-            let $addr = if $addressing.preincrement() {
+            let $addr = if WbAddressing::from_u8($addressing).preincrement() {
                 base.wrapping_add(offset as u32)
             } else {
                 base
             };
             prefetch_arm::<false, true>($emu);
-            if matches!(OFF_TY, WbOffTy::Reg(_)) {
+            if OFF_TY != WbOffTy::IMM {
                 add_cycles($emu, 1);
             }
 
-            let $off_imm = OFF_TY == WbOffTy::Imm;
+            let $off_imm = OFF_TY == WbOffTy::IMM;
 
             $check
 
             $(let $src = reg!($emu.arm9, $src_reg) as $src_ty;)*
             $do_access
 
-            if $addressing.writeback() $(&& $dst_reg != base_reg)* {
+            if WbAddressing::from_u8($addressing).writeback() $(&& $dst_reg != base_reg)* {
                 #[cfg(feature = "interp-r15-write-checks")]
                 if unlikely(base_reg == 15) {
                     unimplemented!(concat!(stringify!($ident), " r15 writeback"));
                 }
-                write_reg_clear_interlock_ab($emu, base_reg, if $addressing.preincrement() {
+                write_reg_clear_interlock_ab($emu, base_reg, if WbAddressing::from_u8($addressing).preincrement() {
                     $addr
                 } else {
                     $addr.wrapping_add(offset as u32)
@@ -121,7 +121,7 @@ wb_handler! {
         if unlikely(!can_read(
             emu,
             addr,
-            ADDRESSING != WbAddressing::PostUser && emu.arm9.engine_data.regs.is_in_priv_mode(),
+            WbAddressing::from_u8(ADDRESSING) != WbAddressing::PostUser && emu.arm9.engine_data.regs.is_in_priv_mode(),
         )) {
             emu.arm9.engine_data.data_cycles = 1;
             if off_imm {
@@ -141,9 +141,9 @@ wb_handler! {
             add_cycles(emu, cycles as RawTimestamp + 1);
             reg!(emu.arm9, 15) = result;
             if emu.arm9.cp15.control().t_bit_load_disabled() {
-                reload_pipeline::<{ StateSource::Arm }>(emu);
+                reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
             } else {
-                reload_pipeline::<{ StateSource::R15Bit0 }>(emu);
+                reload_pipeline::<{ StateSource::R15Bit0 as u8 }>(emu);
             }
         } else {
             emu.arm9.engine_data.data_cycles = cycles;
@@ -164,7 +164,7 @@ wb_handler! {
         if unlikely(!can_write(
             emu,
             addr,
-            ADDRESSING != WbAddressing::PostUser && emu.arm9.engine_data.regs.is_in_priv_mode(),
+            WbAddressing::from_u8(ADDRESSING) != WbAddressing::PostUser && emu.arm9.engine_data.regs.is_in_priv_mode(),
         )) {
             emu.arm9.engine_data.data_cycles = 1;
             if off_imm {
@@ -185,7 +185,7 @@ wb_handler! {
         if unlikely(!can_read(
             emu,
             addr,
-            ADDRESSING != WbAddressing::PostUser && emu.arm9.engine_data.regs.is_in_priv_mode(),
+            WbAddressing::from_u8(ADDRESSING) != WbAddressing::PostUser && emu.arm9.engine_data.regs.is_in_priv_mode(),
         )) {
             emu.arm9.engine_data.data_cycles = 1;
             if off_imm {
@@ -205,9 +205,9 @@ wb_handler! {
             add_cycles(emu, cycles as RawTimestamp + 1);
             reg!(emu.arm9, 15) = result;
             if emu.arm9.cp15.control().t_bit_load_disabled() {
-                reload_pipeline::<{ StateSource::Arm }>(emu);
+                reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
             } else {
-                reload_pipeline::<{ StateSource::R15Bit0 }>(emu);
+                reload_pipeline::<{ StateSource::R15Bit0 as u8 }>(emu);
             }
         } else {
             emu.arm9.engine_data.data_cycles = cycles;
@@ -222,7 +222,7 @@ wb_handler! {
         if unlikely(!can_write(
             emu,
             addr,
-            ADDRESSING != WbAddressing::PostUser && emu.arm9.engine_data.regs.is_in_priv_mode(),
+            WbAddressing::from_u8(ADDRESSING) != WbAddressing::PostUser && emu.arm9.engine_data.regs.is_in_priv_mode(),
         )) {
             emu.arm9.engine_data.data_cycles = 1;
             if off_imm {
@@ -248,7 +248,7 @@ macro_rules! misc_handler {
             $(, dst = $dst_reg: ident)?
         | $check: block $do_access: block
     ) => {
-        pub fn $ident<const OFF_IMM: bool, const UPWARDS: bool, const ADDRESSING: MiscAddressing>(
+        pub fn $ident<const OFF_IMM: bool, const UPWARDS: bool, const ADDRESSING: u8>(
             $emu: &mut Emu<Interpreter>,
             $instr: u32,
         ) {
@@ -279,7 +279,7 @@ macro_rules! misc_handler {
             add_bus_cycles($emu, 1);
 
             let base = reg!($emu.arm9, base_reg);
-            let $addr = if ADDRESSING.preincrement() {
+            let $addr = if MiscAddressing::from_u8(ADDRESSING).preincrement() {
                 base.wrapping_add(offset as u32)
             } else {
                 base
@@ -291,12 +291,12 @@ macro_rules! misc_handler {
             $(let $src = reg!($emu.arm9, $src_reg) as $src_ty;)*
             $do_access
 
-            if ADDRESSING.writeback() $(&& $dst_reg != base_reg)* {
+            if MiscAddressing::from_u8(ADDRESSING).writeback() $(&& $dst_reg != base_reg)* {
                 #[cfg(feature = "interp-r15-write-checks")]
                 if unlikely(base_reg == 15) {
                     unimplemented!(concat!(stringify!($ident), " r15 writeback"));
                 }
-                write_reg_clear_interlock_ab($emu, base_reg, if ADDRESSING.preincrement() {
+                write_reg_clear_interlock_ab($emu, base_reg, if MiscAddressing::from_u8(ADDRESSING).preincrement() {
                     $addr
                 } else {
                     $addr.wrapping_add(offset as u32)
@@ -328,9 +328,9 @@ misc_handler! {
             add_cycles(emu, cycles as RawTimestamp + 1);
             reg!(emu.arm9, 15) = result;
             if emu.arm9.cp15.control().t_bit_load_disabled() {
-                reload_pipeline::<{ StateSource::Arm }>(emu);
+                reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
             } else {
-                reload_pipeline::<{ StateSource::R15Bit0 }>(emu);
+                reload_pipeline::<{ StateSource::R15Bit0 as u8 }>(emu);
             }
         } else {
             emu.arm9.engine_data.data_cycles = cycles;
@@ -358,7 +358,7 @@ misc_handler! {
     }
 }
 
-pub fn ldrd<const OFF_IMM: bool, const UPWARDS: bool, const ADDRESSING: MiscAddressing>(
+pub fn ldrd<const OFF_IMM: bool, const UPWARDS: bool, const ADDRESSING: u8>(
     emu: &mut Emu<Interpreter>,
     instr: u32,
 ) {
@@ -386,7 +386,7 @@ pub fn ldrd<const OFF_IMM: bool, const UPWARDS: bool, const ADDRESSING: MiscAddr
     };
     add_bus_cycles(emu, 2);
 
-    let start_addr = if ADDRESSING.preincrement() {
+    let start_addr = if MiscAddressing::from_u8(ADDRESSING).preincrement() {
         reg!(emu.arm9, base_reg).wrapping_add(offset as u32)
     } else {
         reg!(emu.arm9, base_reg)
@@ -423,7 +423,7 @@ pub fn ldrd<const OFF_IMM: bool, const UPWARDS: bool, const ADDRESSING: MiscAddr
             if $is_r15 {
                 $data_cycles = 1;
                 add_cycles(emu, cycles as RawTimestamp + 1);
-                reload_pipeline::<{ StateSource::Arm }>(emu);
+                reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
             } else {
                 $data_cycles = cycles;
             }
@@ -442,7 +442,7 @@ pub fn ldrd<const OFF_IMM: bool, const UPWARDS: bool, const ADDRESSING: MiscAddr
         use first_data_cycles
     );
 
-    if ADDRESSING.writeback() && dst_base_reg | 1 != base_reg {
+    if MiscAddressing::from_u8(ADDRESSING).writeback() && dst_base_reg | 1 != base_reg {
         #[cfg(feature = "interp-r15-write-checks")]
         if unlikely(base_reg == 15) {
             unimplemented!("ldrd r15 writeback");
@@ -450,7 +450,7 @@ pub fn ldrd<const OFF_IMM: bool, const UPWARDS: bool, const ADDRESSING: MiscAddr
         write_reg_clear_interlock_ab(
             emu,
             base_reg,
-            if ADDRESSING.preincrement() {
+            if MiscAddressing::from_u8(ADDRESSING).preincrement() {
                 start_addr
             } else {
                 start_addr.wrapping_add(offset as u32)
@@ -459,7 +459,7 @@ pub fn ldrd<const OFF_IMM: bool, const UPWARDS: bool, const ADDRESSING: MiscAddr
     }
 }
 
-pub fn strd<const OFF_IMM: bool, const UPWARDS: bool, const ADDRESSING: MiscAddressing>(
+pub fn strd<const OFF_IMM: bool, const UPWARDS: bool, const ADDRESSING: u8>(
     emu: &mut Emu<Interpreter>,
     instr: u32,
 ) {
@@ -486,7 +486,7 @@ pub fn strd<const OFF_IMM: bool, const UPWARDS: bool, const ADDRESSING: MiscAddr
         }
     };
 
-    let start_addr = if ADDRESSING.preincrement() {
+    let start_addr = if MiscAddressing::from_u8(ADDRESSING).preincrement() {
         reg!(emu.arm9, base_reg).wrapping_add(offset as u32)
     } else {
         reg!(emu.arm9, base_reg)
@@ -543,7 +543,7 @@ pub fn strd<const OFF_IMM: bool, const UPWARDS: bool, const ADDRESSING: MiscAddr
 
     add_bus_cycles(emu, 2);
 
-    if ADDRESSING.writeback() {
+    if MiscAddressing::from_u8(ADDRESSING).writeback() {
         #[cfg(feature = "interp-r15-write-checks")]
         if unlikely(base_reg == 15) {
             unimplemented!("strd r15 writeback");
@@ -551,7 +551,7 @@ pub fn strd<const OFF_IMM: bool, const UPWARDS: bool, const ADDRESSING: MiscAddr
         write_reg_clear_interlock_ab(
             emu,
             base_reg,
-            if ADDRESSING.preincrement() {
+            if MiscAddressing::from_u8(ADDRESSING).preincrement() {
                 start_addr
             } else {
                 start_addr.wrapping_add(offset as u32)
@@ -582,9 +582,9 @@ misc_handler! {
             add_cycles(emu, cycles as RawTimestamp + 1);
             reg!(emu.arm9, 15) = result;
             if emu.arm9.cp15.control().t_bit_load_disabled() {
-                reload_pipeline::<{ StateSource::Arm }>(emu);
+                reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
             } else {
-                reload_pipeline::<{ StateSource::R15Bit0 }>(emu);
+                reload_pipeline::<{ StateSource::R15Bit0 as u8 }>(emu);
             }
         } else {
             emu.arm9.engine_data.data_cycles = cycles;
@@ -615,9 +615,9 @@ misc_handler! {
             add_cycles(emu, cycles as RawTimestamp + 1);
             reg!(emu.arm9, 15) = result;
             if emu.arm9.cp15.control().t_bit_load_disabled() {
-                reload_pipeline::<{ StateSource::Arm }>(emu);
+                reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
             } else {
-                reload_pipeline::<{ StateSource::R15Bit0 }>(emu);
+                reload_pipeline::<{ StateSource::R15Bit0 as u8 }>(emu);
             }
         } else {
             emu.arm9.engine_data.data_cycles = cycles;
@@ -836,11 +836,11 @@ pub fn ldm<const UPWARDS: bool, const PREINC: bool, const WRITEBACK: bool, const
         add_cycles(emu, access_cycles as RawTimestamp + 1);
         if S_BIT {
             restore_spsr(emu);
-            reload_pipeline::<{ StateSource::Cpsr }>(emu);
+            reload_pipeline::<{ StateSource::Cpsr as u8 }>(emu);
         } else if emu.arm9.cp15.control().t_bit_load_disabled() {
-            reload_pipeline::<{ StateSource::Arm }>(emu);
+            reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
         } else {
-            reload_pipeline::<{ StateSource::R15Bit0 }>(emu);
+            reload_pipeline::<{ StateSource::R15Bit0 as u8 }>(emu);
         }
         cur_addr = cur_addr.wrapping_add(4);
     }

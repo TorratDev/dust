@@ -22,17 +22,17 @@ pub(super) fn add_sub_reg_imm3<const SUB: bool, const IMM3: bool>(ctx: &mut Cont
     }
 }
 
-pub(super) fn shift_imm<const SHIFT_TY: ShiftImmTy>(ctx: &mut Context, instr: u16) {
+pub(super) fn shift_imm<const SHIFT_TY: u8>(ctx: &mut Context, instr: u16) {
     ctx.branch_addr_base = None;
     let dst_reg = instr & 7;
     let src_reg = instr >> 3 & 7;
     let mut shift = instr >> 6 & 0x1F;
-    if SHIFT_TY != ShiftImmTy::Lsl && shift == 0 {
+    if ShiftImmTy::from_u8(SHIFT_TY) != ShiftImmTy::Lsl && shift == 0 {
         shift = 32;
     }
     ctx.next_instr.opcode = format!(
         "{} r{}, r{}, #{}",
-        match SHIFT_TY {
+        match ShiftImmTy::from_u8(SHIFT_TY) {
             ShiftImmTy::Lsl => "lsl",
             ShiftImmTy::Lsr => "lsr",
             ShiftImmTy::Asr => "asr",
@@ -43,13 +43,13 @@ pub(super) fn shift_imm<const SHIFT_TY: ShiftImmTy>(ctx: &mut Context, instr: u1
     );
 }
 
-pub(super) fn dp_op_imm8<const OP_TY: DpOpImm8Ty>(ctx: &mut Context, instr: u16) {
+pub(super) fn dp_op_imm8<const OP_TY: u8>(ctx: &mut Context, instr: u16) {
     ctx.branch_addr_base = None;
     let src_dst_reg = instr >> 8 & 7;
     let op = instr & 0xFF;
     ctx.next_instr.opcode = format!(
         "{} r{}, #{:#04X}",
-        match OP_TY {
+        match DpOpImm8Ty::from_u8(OP_TY) {
             DpOpImm8Ty::Mov => "mov",
             DpOpImm8Ty::Cmp => "cmp",
             DpOpImm8Ty::Add => "add",
@@ -60,13 +60,13 @@ pub(super) fn dp_op_imm8<const OP_TY: DpOpImm8Ty>(ctx: &mut Context, instr: u16)
     );
 }
 
-pub(super) fn dp_op_reg<const OP_TY: DpOpRegTy>(ctx: &mut Context, instr: u16) {
+pub(super) fn dp_op_reg<const OP_TY: u8>(ctx: &mut Context, instr: u16) {
     ctx.branch_addr_base = None;
     let src_dst_reg = instr & 7;
     let op_reg = instr >> 3 & 7;
     ctx.next_instr.opcode = format!(
         "{} r{}, r{}",
-        match OP_TY {
+        match DpOpRegTy::from_u8(OP_TY) {
             DpOpRegTy::And => "and",
             DpOpRegTy::Eor => "eor",
             DpOpRegTy::Lsl => "lsl",
@@ -89,13 +89,13 @@ pub(super) fn dp_op_reg<const OP_TY: DpOpRegTy>(ctx: &mut Context, instr: u16) {
     );
 }
 
-pub(super) fn dp_op_special<const OP_TY: DpOpSpecialTy>(ctx: &mut Context, instr: u16) {
+pub(super) fn dp_op_special<const OP_TY: u8>(ctx: &mut Context, instr: u16) {
     ctx.branch_addr_base = None;
     let src_dst_reg = (instr & 7) | (instr >> 4 & 8);
     let op_reg = instr >> 3 & 0xF;
     ctx.next_instr.opcode = format!(
         "{} r{}, r{}",
-        match OP_TY {
+        match DpOpSpecialTy::from_u8(OP_TY) {
             DpOpSpecialTy::Add => "add",
             DpOpSpecialTy::Cmp => "cmp",
             DpOpSpecialTy::Mov => "mov",

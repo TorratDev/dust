@@ -8,6 +8,7 @@ use super::{super::Regs as EngineRegs, common::StateSource, Interpreter, Regs};
 use crate::cpu::debug;
 #[cfg(feature = "interp-arm9-interlocks")]
 use crate::utils::schedule::SignedTimestamp;
+use crate::utils::unlikely;
 use crate::{
     cpu::{
         arm9::{bus, Arm9, Event, Timestamp},
@@ -21,7 +22,6 @@ use crate::{
     gpu::engine_3d::Engine3d,
     utils::{schedule::RawTimestamp, Savestate},
 };
-use core::intrinsics::unlikely;
 
 #[cfg(feature = "interp-arm9-interlocks")]
 #[derive(Clone, Copy, Savestate)]
@@ -172,7 +172,7 @@ fn apply_reg_interlock_1<const PORT_C: bool>(emu: &mut Emu<Interpreter>, reg: u8
         let interlock_end = if PORT_C {
             interlock.port_c
         } else {
-            interlock_c.port_ab
+            interlock.port_ab
         };
         if emu.arm9.engine_data.bus_cycle < interlock_end {
             add_cycles(
@@ -353,10 +353,10 @@ macro_rules! get_next_breakpoint {
     };
 }
 
-fn reload_pipeline<const STATE_SOURCE: StateSource>(emu: &mut Emu<Interpreter>) {
+fn reload_pipeline<const STATE_SOURCE: u8>(emu: &mut Emu<Interpreter>) {
     let mut addr = reg!(emu.arm9, 15);
 
-    if match STATE_SOURCE {
+    if match StateSource::from_u8(STATE_SOURCE) {
         StateSource::Arm => false,
         StateSource::Thumb => true,
         StateSource::R15Bit0 => {
@@ -585,7 +585,7 @@ fn handle_undefined<const THUMB: bool>(emu: &mut Emu<Interpreter>, _instr: u32) 
     emu.arm9.engine_data.regs.spsr = prev_cpsr;
     reg!(emu.arm9, 14) = reg!(emu.arm9, 15).wrapping_sub(4 >> THUMB as u8);
     reg!(emu.arm9, 15) = emu.arm9.engine_data.exc_vectors_start | 0x4;
-    reload_pipeline::<{ StateSource::Arm }>(emu);
+    reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
 }
 
 fn handle_swi<const THUMB: bool>(emu: &mut Emu<Interpreter>, number: u8) {
@@ -636,7 +636,7 @@ fn handle_swi<const THUMB: bool>(emu: &mut Emu<Interpreter>, number: u8) {
     emu.arm9.engine_data.regs.spsr = prev_cpsr;
     reg!(emu.arm9, 14) = reg!(emu.arm9, 15).wrapping_sub(4 >> THUMB as u8);
     reg!(emu.arm9, 15) = emu.arm9.engine_data.exc_vectors_start | 0x8;
-    reload_pipeline::<{ StateSource::Arm }>(emu);
+    reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
 }
 
 fn handle_prefetch_abort<const THUMB: bool>(emu: &mut Emu<Interpreter>) {
@@ -684,7 +684,7 @@ fn handle_prefetch_abort<const THUMB: bool>(emu: &mut Emu<Interpreter>) {
     emu.arm9.engine_data.regs.spsr = prev_cpsr;
     reg!(emu.arm9, 14) = reg!(emu.arm9, 15).wrapping_sub((!THUMB as u32) << 2);
     reg!(emu.arm9, 15) = emu.arm9.engine_data.exc_vectors_start | 0xC;
-    reload_pipeline::<{ StateSource::Arm }>(emu);
+    reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
 }
 
 fn handle_data_abort<const THUMB: bool>(emu: &mut Emu<Interpreter>, _addr: u32) {
@@ -728,7 +728,7 @@ fn handle_data_abort<const THUMB: bool>(emu: &mut Emu<Interpreter>, _addr: u32) 
         reg!(emu.arm9, 15).wrapping_sub(4)
     };
     reg!(emu.arm9, 15) = emu.arm9.engine_data.exc_vectors_start | 0x10;
-    reload_pipeline::<{ StateSource::Arm }>(emu);
+    reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
 }
 
 fn enter_hle_swi<const FROM_USER_CODE: bool>(
@@ -810,7 +810,7 @@ fn return_from_hle_swi(emu: &mut Emu<Interpreter>) {
 
     reg!(emu.arm9, 15) = reg!(emu.arm9, 14);
     restore_spsr(emu);
-    reload_pipeline::<{ StateSource::Cpsr }>(emu);
+    reload_pipeline::<{ StateSource::Cpsr as u8 }>(emu);
 }
 
 fn enter_hle_irq<const FROM_USER_CODE: bool>(emu: &mut Emu<Interpreter>, return_addr: u32) {
@@ -848,7 +848,7 @@ fn return_from_hle_irq(emu: &mut Emu<Interpreter>) {
     }
     reg!(emu.arm9, 15) = reg!(emu.arm9, 14).wrapping_sub(4);
     restore_spsr(emu);
-    reload_pipeline::<{ StateSource::Cpsr }>(emu);
+    reload_pipeline::<{ StateSource::Cpsr as u8 }>(emu);
 }
 
 #[allow(unused_variables)]
@@ -891,7 +891,7 @@ impl CoreData for EngineData {
     fn setup(emu: &mut Emu<Interpreter>) {
         add_bus_cycles(emu, 2);
         reg!(emu.arm9, 15) = 0xFFFF_0000;
-        reload_pipeline::<{ StateSource::Arm }>(emu);
+        reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
     }
 
     fn setup_direct_boot(emu: &mut Emu<Interpreter>, entry_addr: u32) {
@@ -919,7 +919,7 @@ impl CoreData for EngineData {
             }; 16];
         };
         reg!(emu.arm9, 15) = entry_addr;
-        reload_pipeline::<{ StateSource::R15Bit0 }>(emu);
+        reload_pipeline::<{ StateSource::R15Bit0 as u8 }>(emu);
     }
 
     #[inline]
@@ -940,7 +940,7 @@ impl CoreData for EngineData {
     #[inline]
     fn jump(emu: &mut Emu<Interpreter>, addr: u32) {
         reg!(emu.arm9, 15) = addr;
-        reload_pipeline::<{ StateSource::R15Bit0 }>(emu);
+        reload_pipeline::<{ StateSource::R15Bit0 as u8 }>(emu);
     }
 
     #[inline]
@@ -973,14 +973,14 @@ impl CoreData for EngineData {
         emu.arm9.engine_data.regs.set_from_engine_regs(regs);
         reg!(emu.arm9, 15) = reg!(emu.arm9, 15)
             .wrapping_sub(8 >> emu.arm9.engine_data.regs.cpsr.thumb_state() as u8);
-        reload_pipeline::<{ StateSource::Cpsr }>(emu);
+        reload_pipeline::<{ StateSource::Cpsr as u8 }>(emu);
     }
 
     #[inline]
     fn jump_and_link(emu: &mut Emu<Interpreter>, addr: u32, lr: u32) {
         reg!(emu.arm9, 14) = lr;
         reg!(emu.arm9, 15) = addr;
-        reload_pipeline::<{ StateSource::R15Bit0 }>(emu);
+        reload_pipeline::<{ StateSource::R15Bit0 as u8 }>(emu);
     }
 
     #[inline]
@@ -1161,7 +1161,7 @@ impl Arm9Data for EngineData {
                         emu.arm9.engine_data.regs.spsr = prev_cpsr;
                         reg!(emu.arm9, 14) = return_addr;
                         reg!(emu.arm9, 15) = emu.arm9.engine_data.exc_vectors_start | 0x18;
-                        reload_pipeline::<{ StateSource::Arm }>(emu);
+                        reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
                     }
                 } else if emu.arm9.irqs.halted() {
                     emu.arm9

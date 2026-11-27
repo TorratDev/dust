@@ -16,16 +16,70 @@ use std::{
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use winit::window::Icon;
 use winit::{
+    application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalSize},
-    event::{Event, WindowEvent},
-    event_loop::EventLoop,
-    window::Window as WinitWindow,
+    event::{DeviceEvent, DeviceId, Event, StartCause, WindowEvent},
+    event_loop::{ActiveEventLoop, EventLoop},
+    window::{Window as WinitWindow, WindowId},
 };
 #[cfg(target_os = "macos")]
 use winit::{
     platform::macos::WindowAttributesExtMacOS,
     raw_window_handle::{HasWindowHandle, RawWindowHandle},
 };
+
+struct EventHandler<F>(F);
+
+impl<F> ApplicationHandler for EventHandler<F>
+where
+    F: FnMut(Event<()>, &ActiveEventLoop),
+{
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+        (self.0)(Event::NewEvents(cause), event_loop);
+    }
+
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        (self.0)(Event::Resumed, event_loop);
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: ()) {
+        (self.0)(Event::UserEvent(event), event_loop);
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        (self.0)(Event::WindowEvent { window_id, event }, event_loop);
+    }
+
+    fn device_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        (self.0)(Event::DeviceEvent { device_id, event }, event_loop);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        (self.0)(Event::AboutToWait, event_loop);
+    }
+
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        (self.0)(Event::Suspended, event_loop);
+    }
+
+    fn exiting(&mut self, event_loop: &ActiveEventLoop) {
+        (self.0)(Event::LoopExiting, event_loop);
+    }
+
+    fn memory_warning(&mut self, event_loop: &ActiveEventLoop) {
+        (self.0)(Event::MemoryWarning, event_loop);
+    }
+}
 
 pub enum AdapterSelection {
     Auto(wgpu::PowerPreference),
@@ -149,7 +203,7 @@ impl GfxSurface {
         }
     }
 
-    pub fn surface(&self) -> &wgpu::Surface {
+    pub fn surface(&self) -> &wgpu::Surface<'_> {
         &self.surface
     }
 
@@ -517,7 +571,7 @@ pub enum ControlFlow {
 
 enum WindowState {
     New(NewWindow),
-    Shown(Window),
+    Shown(Box<Window>),
 }
 
 impl Builder {
@@ -596,213 +650,216 @@ impl Builder {
         let mut imgui_ = ManuallyDrop::new(self.imgui);
         let mut state_ = ManuallyDrop::new(None);
 
-        let _ = self.event_loop.run(move |event, elwt| {
-            let imgui = &mut *imgui_;
+        let _ = self.event_loop.run_app(&mut EventHandler(
+            move |event: Event<()>, elwt: &ActiveEventLoop| {
+                let imgui = &mut *imgui_;
 
-            if let Event::Resumed = &event {
-                if matches!(&*window_, WindowState::New(_)) {
-                    let window = unsafe {
-                        let WindowState::New(window) = ManuallyDrop::take(&mut window_) else {
-                            unreachable_unchecked()
+                if let Event::Resumed = &event {
+                    if matches!(&*window_, WindowState::New(_)) {
+                        let window = unsafe {
+                            let WindowState::New(window) = ManuallyDrop::take(&mut window_) else {
+                                unreachable_unchecked()
+                            };
+                            window
                         };
-                        window
-                    };
 
-                    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
-                    let mut window_attrs = WinitWindow::default_attributes()
-                        .with_title(window.title)
-                        .with_inner_size(LogicalSize::new(
-                            window.default_logical_size.0,
-                            window.default_logical_size.1,
-                        ));
-                    #[cfg(target_os = "macos")]
-                    if window.macos_title_bar_is_hidden {
-                        window_attrs = window_attrs
-                            .with_titlebar_transparent(true)
-                            .with_fullsize_content_view(true);
-                    }
-
-                    let winit_window = elwt
-                        .create_window(window_attrs)
-                        .expect("couldn't create window");
-                    let scale_factor = winit_window.scale_factor();
-
-                    let imgui_state = ImGuiState::new(scale_factor, imgui);
-
-                    let mut imgui_winit = imgui_winit_support::WinitPlatform::init(imgui);
-                    imgui_winit.attach_window(
-                        imgui.io_mut(),
-                        &winit_window,
-                        imgui_winit_support::HiDpiMode::Default,
-                    );
-
-                    let gfx_surface =
-                        GfxSurface::new(&winit_window, &window.gfx_device, window.srgb_mode);
-                    let imgui_gfx = imgui_wgpu::Renderer::new(
-                        &window.gfx_device.device,
-                        &window.gfx_device.queue,
-                        imgui,
-                        gfx_surface.config.format,
-                        window.srgb_mode,
-                    );
-
-                    let mut window = Window {
-                        window: winit_window,
-                        scale_factor,
-                        last_frame: Instant::now(),
-                        gfx_device: window.gfx_device,
-                        gfx_surface,
-                        imgui: imgui_state,
-                        imgui_winit,
-                        imgui_gfx,
-                        is_occluded: false,
+                        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+                        let mut window_attrs = WinitWindow::default_attributes()
+                            .with_title(window.title)
+                            .with_inner_size(LogicalSize::new(
+                                window.default_logical_size.0,
+                                window.default_logical_size.1,
+                            ));
                         #[cfg(target_os = "macos")]
-                        macos_title_bar_is_transparent: window.macos_title_bar_is_hidden,
-                        #[cfg(target_os = "macos")]
-                        macos_title_bar_height: 0.0,
-                    };
+                        if window.macos_title_bar_is_hidden {
+                            window_attrs = window_attrs
+                                .with_titlebar_transparent(true)
+                                .with_fullsize_content_view(true);
+                        }
 
-                    #[cfg(target_os = "macos")]
-                    window.update_macos_title_bar_height();
+                        let winit_window = elwt
+                            .create_window(window_attrs)
+                            .expect("couldn't create window");
+                        let scale_factor = winit_window.scale_factor();
 
-                    state_ =
-                        ManuallyDrop::new(Some(unsafe { ManuallyDrop::take(&mut init_state) }(
-                            &mut window,
-                        )));
-                    window_ = ManuallyDrop::new(WindowState::Shown(window));
-                }
-            }
+                        let imgui_state = ImGuiState::new(scale_factor, imgui);
 
-            let WindowState::Shown(window) = &mut *window_ else {
-                return;
-            };
-            let state = unsafe { state_.as_mut().unwrap_unchecked() };
-
-            window
-                .imgui_winit
-                .handle_event(imgui.io_mut(), &window.window, &event);
-
-            process_event(window, state, &event);
-
-            let mut redraw = || {
-                let now = Instant::now();
-                let delta_time = now - window.last_frame;
-                window.last_frame = now;
-
-                if window.gfx_surface.format_changed {
-                    window.imgui_gfx.change_swapchain_format(
-                        &window.gfx_device.device,
-                        window.gfx_surface.config.format,
-                    );
-                }
-
-                let io = imgui.io_mut();
-                io.update_delta_time(delta_time);
-                window
-                    .imgui_winit
-                    .prepare_frame(io, &window.window)
-                    .expect("couldn't prepare imgui frame");
-
-                let ui = imgui.frame();
-                if draw_imgui(window, state, ui) == ControlFlow::Exit {
-                    elwt.exit();
-                }
-
-                let frame = window
-                    .gfx_surface
-                    .start_frame(&window.gfx_device, window.window.inner_size());
-                let mut encoder = window
-                    .gfx_device
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-
-                if draw(window, state, &frame, &mut encoder, delta_time) == ControlFlow::Exit {
-                    elwt.exit();
-                }
-
-                window.imgui_winit.prepare_render(ui, &window.window);
-                window.imgui_gfx.render(
-                    &window.gfx_device.device,
-                    &window.gfx_device.queue,
-                    &mut encoder,
-                    &frame
-                        .texture
-                        .create_view(&wgpu::TextureViewDescriptor::default()),
-                    imgui.render(),
-                );
-
-                window.gfx_device.queue.submit(iter::once(encoder.finish()));
-                window.window.pre_present_notify();
-                frame.present();
-
-                window.gfx_device.device.poll(wgpu::Maintain::Poll);
-
-                if !window.is_occluded {
-                    window.window.request_redraw();
-                }
-            };
-
-            match event {
-                Event::WindowEvent {
-                    event: WindowEvent::CloseRequested,
-                    ..
-                } => {
-                    elwt.exit();
-                }
-
-                Event::WindowEvent {
-                    event: WindowEvent::Resized(_),
-                    ..
-                } => {
-                    window.gfx_surface.invalidate_swapchain();
-                    window.window.request_redraw();
-                }
-
-                Event::WindowEvent {
-                    event: WindowEvent::ScaleFactorChanged { scale_factor, .. },
-                    ..
-                } => {
-                    window.scale_factor = scale_factor;
-                    window.gfx_surface.invalidate_swapchain();
-                    window.window.request_redraw();
-                }
-
-                Event::WindowEvent {
-                    event: WindowEvent::Occluded(is_occluded),
-                    ..
-                } => {
-                    window.is_occluded = is_occluded;
-                    if !is_occluded {
-                        window.window.request_redraw();
-                    }
-                }
-
-                Event::WindowEvent {
-                    event: WindowEvent::RedrawRequested,
-                    ..
-                } => {
-                    redraw();
-                }
-
-                Event::LoopExiting => {
-                    unsafe {
-                        ManuallyDrop::take(&mut on_exit_imgui)(
-                            window,
-                            &mut *state,
-                            ManuallyDrop::take(&mut imgui_),
+                        let mut imgui_winit = imgui_winit_support::WinitPlatform::init(imgui);
+                        imgui_winit.attach_window(
+                            imgui.io_mut(),
+                            &winit_window,
+                            imgui_winit_support::HiDpiMode::Default,
                         );
 
-                        let WindowState::Shown(window) = ManuallyDrop::take(&mut window_) else {
-                            unreachable_unchecked()
-                        };
-                        let state = ManuallyDrop::take(&mut state_).unwrap_unchecked();
+                        let gfx_surface =
+                            GfxSurface::new(&winit_window, &window.gfx_device, window.srgb_mode);
+                        let imgui_gfx = imgui_wgpu::Renderer::new(
+                            &window.gfx_device.device,
+                            &window.gfx_device.queue,
+                            imgui,
+                            gfx_surface.config.format,
+                            window.srgb_mode,
+                        );
 
-                        ManuallyDrop::take(&mut on_exit)(window, state)
-                    };
+                        let mut window = Window {
+                            window: winit_window,
+                            scale_factor,
+                            last_frame: Instant::now(),
+                            gfx_device: window.gfx_device,
+                            gfx_surface,
+                            imgui: imgui_state,
+                            imgui_winit,
+                            imgui_gfx,
+                            is_occluded: false,
+                            #[cfg(target_os = "macos")]
+                            macos_title_bar_is_transparent: window.macos_title_bar_is_hidden,
+                            #[cfg(target_os = "macos")]
+                            macos_title_bar_height: 0.0,
+                        };
+
+                        #[cfg(target_os = "macos")]
+                        window.update_macos_title_bar_height();
+
+                        state_ =
+                            ManuallyDrop::new(Some(
+                                unsafe { ManuallyDrop::take(&mut init_state) }(&mut window),
+                            ));
+                        window_ = ManuallyDrop::new(WindowState::Shown(Box::new(window)));
+                    }
                 }
-                _ => {}
-            }
-        });
+
+                let WindowState::Shown(window) = &mut *window_ else {
+                    return;
+                };
+                let state = unsafe { state_.as_mut().unwrap_unchecked() };
+
+                window
+                    .imgui_winit
+                    .handle_event(imgui.io_mut(), &window.window, &event);
+
+                process_event(window, state, &event);
+
+                let mut redraw = || {
+                    let now = Instant::now();
+                    let delta_time = now - window.last_frame;
+                    window.last_frame = now;
+
+                    if window.gfx_surface.format_changed {
+                        window.imgui_gfx.change_swapchain_format(
+                            &window.gfx_device.device,
+                            window.gfx_surface.config.format,
+                        );
+                    }
+
+                    let io = imgui.io_mut();
+                    io.update_delta_time(delta_time);
+                    window
+                        .imgui_winit
+                        .prepare_frame(io, &window.window)
+                        .expect("couldn't prepare imgui frame");
+
+                    let ui = imgui.frame();
+                    if draw_imgui(window, state, ui) == ControlFlow::Exit {
+                        elwt.exit();
+                    }
+
+                    let frame = window
+                        .gfx_surface
+                        .start_frame(&window.gfx_device, window.window.inner_size());
+                    let mut encoder = window
+                        .gfx_device
+                        .device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+
+                    if draw(window, state, &frame, &mut encoder, delta_time) == ControlFlow::Exit {
+                        elwt.exit();
+                    }
+
+                    window.imgui_winit.prepare_render(ui, &window.window);
+                    window.imgui_gfx.render(
+                        &window.gfx_device.device,
+                        &window.gfx_device.queue,
+                        &mut encoder,
+                        &frame
+                            .texture
+                            .create_view(&wgpu::TextureViewDescriptor::default()),
+                        imgui.render(),
+                    );
+
+                    window.gfx_device.queue.submit(iter::once(encoder.finish()));
+                    window.window.pre_present_notify();
+                    frame.present();
+
+                    window.gfx_device.device.poll(wgpu::Maintain::Poll);
+
+                    if !window.is_occluded {
+                        window.window.request_redraw();
+                    }
+                };
+
+                match event {
+                    Event::WindowEvent {
+                        event: WindowEvent::CloseRequested,
+                        ..
+                    } => {
+                        elwt.exit();
+                    }
+
+                    Event::WindowEvent {
+                        event: WindowEvent::Resized(_),
+                        ..
+                    } => {
+                        window.gfx_surface.invalidate_swapchain();
+                        window.window.request_redraw();
+                    }
+
+                    Event::WindowEvent {
+                        event: WindowEvent::ScaleFactorChanged { scale_factor, .. },
+                        ..
+                    } => {
+                        window.scale_factor = scale_factor;
+                        window.gfx_surface.invalidate_swapchain();
+                        window.window.request_redraw();
+                    }
+
+                    Event::WindowEvent {
+                        event: WindowEvent::Occluded(is_occluded),
+                        ..
+                    } => {
+                        window.is_occluded = is_occluded;
+                        if !is_occluded {
+                            window.window.request_redraw();
+                        }
+                    }
+
+                    Event::WindowEvent {
+                        event: WindowEvent::RedrawRequested,
+                        ..
+                    } => {
+                        redraw();
+                    }
+
+                    Event::LoopExiting => {
+                        unsafe {
+                            ManuallyDrop::take(&mut on_exit_imgui)(
+                                window,
+                                &mut *state,
+                                ManuallyDrop::take(&mut imgui_),
+                            );
+
+                            let WindowState::Shown(window) = ManuallyDrop::take(&mut window_)
+                            else {
+                                unreachable_unchecked()
+                            };
+                            let state = ManuallyDrop::take(&mut state_).unwrap_unchecked();
+
+                            ManuallyDrop::take(&mut on_exit)(*window, state)
+                        };
+                    }
+                    _ => {}
+                }
+            },
+        ));
         std::process::exit(0);
     }
 }

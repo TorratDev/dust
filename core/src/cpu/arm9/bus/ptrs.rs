@@ -112,7 +112,8 @@ impl Ptrs {
 
     #[cfg(feature = "bft-r")]
     pub fn disable_read(&mut self, addr: u32, flags: RDisableFlags) {
-        debug_assert!(flags != 0 && flags & !r_disable_flags::ALL == 0);
+        debug_assert_ne!(flags, 0);
+        debug_assert_eq!(flags & !r_disable_flags::ALL, 0);
         let i = (addr >> Self::PAGE_SHIFT) as usize;
         #[cfg(feature = "bft-w")]
         {
@@ -129,7 +130,8 @@ impl Ptrs {
 
     #[cfg(feature = "bft-r")]
     pub fn enable_read(&mut self, addr: u32, flags: RDisableFlags) {
-        debug_assert!(flags != 0 && flags & !r_disable_flags::ALL == 0);
+        debug_assert_ne!(flags, 0);
+        debug_assert_eq!(flags & !r_disable_flags::ALL, 0);
         let i = (addr >> Self::PAGE_SHIFT) as usize;
         #[cfg(feature = "bft-w")]
         {
@@ -151,7 +153,8 @@ impl Ptrs {
 
     #[cfg(feature = "bft-r")]
     pub fn enable_read_all(&mut self, flags: RDisableFlags) {
-        debug_assert!(flags != 0 && flags & !r_disable_flags::ALL == 0);
+        debug_assert_ne!(flags, 0);
+        debug_assert_eq!(flags & !r_disable_flags::ALL, 0);
         #[cfg(feature = "bft-w")]
         {
             let disable_attrs_mask = !(flags << disable_attrs::R_DISABLE_START);
@@ -178,7 +181,8 @@ impl Ptrs {
 
     #[cfg(feature = "bft-w")]
     pub fn disable_write(&mut self, addr: u32, flags: WDisableFlags) {
-        debug_assert!(flags != 0 && flags & !w_disable_flags::ALL == 0);
+        debug_assert_ne!(flags, 0);
+        debug_assert_eq!(flags & !w_disable_flags::ALL, 0);
         let i = (addr >> Self::PAGE_SHIFT) as usize;
         #[cfg(feature = "bft-r")]
         {
@@ -195,7 +199,8 @@ impl Ptrs {
 
     #[cfg(feature = "bft-w")]
     pub fn enable_write(&mut self, addr: u32, flags: WDisableFlags) {
-        debug_assert!(flags != 0 && flags & !w_disable_flags::ALL == 0);
+        debug_assert_ne!(flags, 0);
+        debug_assert_eq!(flags & !w_disable_flags::ALL, 0);
         let i = (addr >> Self::PAGE_SHIFT) as usize;
         #[cfg(feature = "bft-r")]
         {
@@ -217,7 +222,8 @@ impl Ptrs {
 
     #[cfg(feature = "bft-w")]
     pub fn enable_write_all(&mut self, flags: WDisableFlags) {
-        debug_assert!(flags != 0 && flags & !w_disable_flags::ALL == 0);
+        debug_assert_ne!(flags, 0);
+        debug_assert_eq!(flags & !w_disable_flags::ALL, 0);
         #[cfg(feature = "bft-r")]
         {
             let disable_attrs_mask = !(flags << disable_attrs::W_DISABLE_START);
@@ -249,10 +255,11 @@ impl Ptrs {
         mem_size: usize,
         (lower_bound, upper_bound): (u32, u32),
     ) {
-        debug_assert!(mask != 0 && mask & !mask::ALL == 0);
-        debug_assert!(lower_bound & Self::PAGE_MASK == 0);
-        debug_assert!(upper_bound & Self::PAGE_MASK == Self::PAGE_MASK);
-        debug_assert!(mem_size & Self::PAGE_MASK as usize == 0);
+        debug_assert_ne!(mask, 0);
+        debug_assert_eq!(mask & !mask::ALL, 0);
+        debug_assert_eq!(lower_bound & Self::PAGE_MASK, 0);
+        debug_assert_eq!(upper_bound & Self::PAGE_MASK, Self::PAGE_MASK);
+        debug_assert_eq!(mem_size & Self::PAGE_MASK as usize, 0);
 
         let lower_bound = (lower_bound >> Self::PAGE_SHIFT) as usize;
         let upper_bound = (upper_bound >> Self::PAGE_SHIFT) as usize;
@@ -319,8 +326,8 @@ impl Ptrs {
     }
 
     pub fn unmap_range(&mut self, (lower_bound, upper_bound): (u32, u32)) {
-        debug_assert!(lower_bound & Self::PAGE_MASK == 0);
-        debug_assert!(upper_bound & Self::PAGE_MASK == Self::PAGE_MASK);
+        debug_assert_eq!(lower_bound & Self::PAGE_MASK, 0);
+        debug_assert_eq!(upper_bound & Self::PAGE_MASK, Self::PAGE_MASK);
 
         let lower_bound = (lower_bound >> Self::PAGE_SHIFT) as usize;
         let upper_bound = (upper_bound >> Self::PAGE_SHIFT) as usize;

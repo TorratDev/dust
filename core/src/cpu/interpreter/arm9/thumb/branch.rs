@@ -1,18 +1,18 @@
 use super::super::{
     add_bus_cycles, apply_reg_interlock_1, handle_undefined, prefetch_thumb, reload_pipeline,
 };
+use crate::utils::unlikely;
 use crate::{
     cpu::interpreter::{common::StateSource, Interpreter},
     emu::Emu,
 };
-use core::intrinsics::unlikely;
 
 pub fn b(emu: &mut Emu<Interpreter>, instr: u16) {
     let branch_addr = reg!(emu.arm9, 15).wrapping_add(((instr as i32) << 21 >> 20) as u32);
     add_bus_cycles(emu, 2);
     prefetch_thumb::<true, false>(emu);
     reg!(emu.arm9, 15) = branch_addr;
-    reload_pipeline::<{ StateSource::Thumb }>(emu);
+    reload_pipeline::<{ StateSource::Thumb as u8 }>(emu);
 }
 
 pub fn b_cond<const COND: u8>(emu: &mut Emu<Interpreter>, instr: u16) {
@@ -23,7 +23,7 @@ pub fn b_cond<const COND: u8>(emu: &mut Emu<Interpreter>, instr: u16) {
     }
     add_bus_cycles(emu, 2);
     reg!(emu.arm9, 15) = reg!(emu.arm9, 15).wrapping_add((instr as i8 as u32) << 1);
-    reload_pipeline::<{ StateSource::Thumb }>(emu);
+    reload_pipeline::<{ StateSource::Thumb as u8 }>(emu);
 }
 
 pub fn bx<const LINK: bool>(emu: &mut Emu<Interpreter>, instr: u16) {
@@ -36,7 +36,7 @@ pub fn bx<const LINK: bool>(emu: &mut Emu<Interpreter>, instr: u16) {
         reg!(emu.arm9, 14) = reg!(emu.arm9, 15).wrapping_sub(1);
     }
     reg!(emu.arm9, 15) = branch_addr;
-    reload_pipeline::<{ StateSource::R15Bit0 }>(emu);
+    reload_pipeline::<{ StateSource::R15Bit0 as u8 }>(emu);
 }
 
 pub fn bl_prefix(emu: &mut Emu<Interpreter>, instr: u16) {
@@ -60,8 +60,8 @@ pub fn bl_suffix<const EXCHANGE: bool>(emu: &mut Emu<Interpreter>, instr: u16) {
         {
             emu.arm9.engine_data.r15_increment = 4;
         }
-        reload_pipeline::<{ StateSource::Arm }>(emu);
+        reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
     } else {
-        reload_pipeline::<{ StateSource::Thumb }>(emu);
+        reload_pipeline::<{ StateSource::Thumb as u8 }>(emu);
     }
 }

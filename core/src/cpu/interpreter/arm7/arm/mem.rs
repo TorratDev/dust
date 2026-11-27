@@ -1,4 +1,5 @@
 use super::super::{add_cycles, reload_pipeline, restore_spsr};
+use crate::utils::unlikely;
 use crate::{
     cpu::{
         arm7::bus,
@@ -13,7 +14,6 @@ use crate::{
     emu::Emu,
     utils::schedule::RawTimestamp,
 };
-use core::intrinsics::unlikely;
 
 macro_rules! wb_handler {
     (
@@ -26,12 +26,12 @@ macro_rules! wb_handler {
             $(, dst = $dst_reg: ident)?
         | $inner: block
     ) => {
-        pub fn $ident<const OFF_TY: WbOffTy, const UPWARDS: bool, const ADDRESSING: WbAddressing>(
+        pub fn $ident<const OFF_TY: u8, const UPWARDS: bool, const ADDRESSING: u8>(
             $emu: &mut Emu<Interpreter>,
             $instr: u32,
         ) {
             let offset = {
-                let abs_off = match OFF_TY {
+                let abs_off = match WbOffTy::from_u8(OFF_TY) {
                     WbOffTy::Imm => $instr & 0xFFF,
                     WbOffTy::Reg(shift_ty) => {
                         let value = reg!($emu.arm7, $instr & 0xF);
@@ -57,7 +57,7 @@ macro_rules! wb_handler {
 
             let base_reg = $instr >> 16 & 0xF;
             let base = reg!($emu.arm7, base_reg);
-            let $addr = if ADDRESSING.preincrement() {
+            let $addr = if WbAddressing::from_u8(ADDRESSING).preincrement() {
                 base.wrapping_add(offset as u32)
             } else {
                 base
@@ -65,12 +65,12 @@ macro_rules! wb_handler {
             inc_r15!($emu.arm7, 4);
             $(
                 { let $dst_reg = 0; let _ = $dst_reg; }
-                if ADDRESSING.writeback() {
+                if WbAddressing::from_u8(ADDRESSING).writeback() {
                     #[cfg(feature = "interp-r15-write-checks")]
                     if unlikely(base_reg == 15) {
                         unimplemented!(concat!(stringify!($ident), " r15 writeback"));
                     }
-                    reg!($emu.arm7, base_reg) = if ADDRESSING.preincrement() {
+                    reg!($emu.arm7, base_reg) = if WbAddressing::from_u8(ADDRESSING).preincrement() {
                         $addr
                     } else {
                         $addr.wrapping_add(offset as u32)
@@ -85,12 +85,12 @@ macro_rules! wb_handler {
 
             $(
                 let _ = $src_reg;
-                if ADDRESSING.writeback() {
+                if WbAddressing::from_u8(ADDRESSING).writeback() {
                     #[cfg(feature = "interp-r15-write-checks")]
                     if unlikely(base_reg == 15) {
                         unimplemented!(concat!(stringify!($ident), " r15 writeback"));
                     }
-                    reg!($emu.arm7, base_reg) = if ADDRESSING.preincrement() {
+                    reg!($emu.arm7, base_reg) = if WbAddressing::from_u8(ADDRESSING).preincrement() {
                         $addr
                     } else {
                         $addr.wrapping_add(offset as u32)
@@ -110,7 +110,7 @@ wb_handler! {
         emu.arm7.engine_data.prefetch_nseq = true;
         reg!(emu.arm7, dst_reg) = result;
         if dst_reg == 15 {
-            reload_pipeline::<{ StateSource::Arm }>(emu);
+            reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
         }
     }
 }
@@ -134,7 +134,7 @@ wb_handler! {
         emu.arm7.engine_data.prefetch_nseq = true;
         reg!(emu.arm7, dst_reg) = result;
         if dst_reg == 15 {
-            reload_pipeline::<{ StateSource::Arm }>(emu);
+            reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
         }
     }
 }
@@ -160,7 +160,7 @@ macro_rules! misc_handler {
             $(, dst = $dst_reg: ident)?
         | $inner: block
     ) => {
-        pub fn $ident<const OFF_IMM: bool, const UPWARDS: bool, const ADDRESSING: MiscAddressing>(
+        pub fn $ident<const OFF_IMM: bool, const UPWARDS: bool, const ADDRESSING: u8>(
             $emu: &mut Emu<Interpreter>,
             $instr: u32,
         ) {
@@ -178,7 +178,7 @@ macro_rules! misc_handler {
             };
             let base_reg = $instr >> 16 & 0xF;
             let base = reg!($emu.arm7, base_reg);
-            let $addr = if ADDRESSING.preincrement() {
+            let $addr = if MiscAddressing::from_u8(ADDRESSING).preincrement() {
                 base.wrapping_add(offset as u32)
             } else {
                 base
@@ -186,12 +186,12 @@ macro_rules! misc_handler {
             inc_r15!($emu.arm7, 4);
             $(
                 { let $dst_reg = 0; let _ = $dst_reg; }
-                if ADDRESSING.writeback() {
+                if MiscAddressing::from_u8(ADDRESSING).writeback() {
                     #[cfg(feature = "interp-r15-write-checks")]
                     if unlikely(base_reg == 15) {
                         unimplemented!(concat!(stringify!($ident), " r15 writeback"));
                     }
-                    reg!($emu.arm7, base_reg) = if ADDRESSING.preincrement() {
+                    reg!($emu.arm7, base_reg) = if MiscAddressing::from_u8(ADDRESSING).preincrement() {
                         $addr
                     } else {
                         $addr.wrapping_add(offset as u32)
@@ -206,12 +206,12 @@ macro_rules! misc_handler {
 
             $(
                 let _ = $src_reg;
-                if ADDRESSING.writeback() {
+                if MiscAddressing::from_u8(ADDRESSING).writeback() {
                     #[cfg(feature = "interp-r15-write-checks")]
                     if unlikely(base_reg == 15) {
                         unimplemented!(concat!(stringify!($ident), " r15 writeback"));
                     }
-                    reg!($emu.arm7, base_reg) = if ADDRESSING.preincrement() {
+                    reg!($emu.arm7, base_reg) = if MiscAddressing::from_u8(ADDRESSING).preincrement() {
                         $addr
                     } else {
                         $addr.wrapping_add(offset as u32)
@@ -231,7 +231,7 @@ misc_handler! {
         emu.arm7.engine_data.prefetch_nseq = true;
         reg!(emu.arm7, dst_reg) = result;
         if dst_reg == 15 {
-            reload_pipeline::<{ StateSource::Arm }>(emu);
+            reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
         }
     }
 }
@@ -277,7 +277,7 @@ misc_handler! {
         emu.arm7.engine_data.prefetch_nseq = true;
         reg!(emu.arm7, dst_reg) = result;
         if dst_reg == 15 {
-            reload_pipeline::<{ StateSource::Arm }>(emu);
+            reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
         }
     }
 }
@@ -294,7 +294,7 @@ misc_handler! {
         emu.arm7.engine_data.prefetch_nseq = true;
         reg!(emu.arm7, dst_reg) = result;
         if dst_reg == 15 {
-            reload_pipeline::<{ StateSource::Arm }>(emu);
+            reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
         }
     }
 }
@@ -372,9 +372,9 @@ pub fn ldm<const UPWARDS: bool, const PREINC: bool, const WRITEBACK: bool, const
         reg!(emu.arm7, 15) = result;
         return if S_BIT {
             restore_spsr(emu);
-            reload_pipeline::<{ StateSource::Cpsr }>(emu);
+            reload_pipeline::<{ StateSource::Cpsr as u8 }>(emu);
         } else {
-            reload_pipeline::<{ StateSource::Arm }>(emu);
+            reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
         };
     }
 
@@ -437,9 +437,9 @@ pub fn ldm<const UPWARDS: bool, const PREINC: bool, const WRITEBACK: bool, const
         reg!(emu.arm7, 15) = result;
         if S_BIT {
             restore_spsr(emu);
-            reload_pipeline::<{ StateSource::Cpsr }>(emu);
+            reload_pipeline::<{ StateSource::Cpsr as u8 }>(emu);
         } else {
-            reload_pipeline::<{ StateSource::Arm }>(emu);
+            reload_pipeline::<{ StateSource::Arm as u8 }>(emu);
         }
     }
 }

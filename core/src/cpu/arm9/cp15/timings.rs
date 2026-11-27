@@ -69,8 +69,8 @@ impl Timings {
         new_timings: Cycles,
         (lower_bound, upper_bound): (u32, u32),
     ) {
-        debug_assert!(lower_bound & Self::PAGE_MASK == 0);
-        debug_assert!(upper_bound & Self::PAGE_MASK == Self::PAGE_MASK);
+        debug_assert_eq!(lower_bound & Self::PAGE_MASK, 0);
+        debug_assert_eq!(upper_bound & Self::PAGE_MASK, Self::PAGE_MASK);
 
         let lower_bound = (lower_bound >> Self::PAGE_SHIFT) as usize;
         let upper_bound = (upper_bound >> Self::PAGE_SHIFT) as usize;
@@ -125,8 +125,8 @@ impl Timings {
         (lower_bound, upper_bound): (u32, u32),
         sys_bus_timings: &SysBusTimings,
     ) {
-        debug_assert!(lower_bound & Self::PAGE_MASK == 0);
-        debug_assert!(upper_bound & Self::PAGE_MASK == Self::PAGE_MASK);
+        debug_assert_eq!(lower_bound & Self::PAGE_MASK, 0);
+        debug_assert_eq!(upper_bound & Self::PAGE_MASK, Self::PAGE_MASK);
 
         let lower_bound = (lower_bound >> Self::PAGE_SHIFT) as usize;
         let upper_bound = (upper_bound >> Self::PAGE_SHIFT) as usize;

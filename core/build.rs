@@ -66,20 +66,20 @@ mod interpreter {
                     Instr::DpOp { ty, set_flags, op } => {
                         write!(
                             file,
-                            "dp_op::<{{DpOpTy::{}}}, ",
+                            "dp_op::<{{DpOpTy::{} as u8}}, ",
                             [
                                 "And", "Eor", "Sub", "Rsb", "Add", "Adc", "Sbc", "Rsc", "Tst",
                                 "Teq", "Cmp", "Cmn", "Orr", "Mov", "Bic", "Mvn",
                             ][ty as usize]
                         )?;
                         match op {
-                            DpOperand::Imm => write!(file, "{{DpOperand::Imm}}"),
+                            DpOperand::Imm => write!(file, "{{DpOperand::IMM}}"),
                             DpOperand::Reg {
                                 shift_ty,
                                 shift_imm,
                             } => write!(
                                 file,
-                                "{{DpOperand::Reg {{ shift_ty: {}, shift_imm: {} }}}}",
+                                "{{DpOperand::encode_reg({}, {})}}",
                                 arm_shift_ty_to_str(shift_ty),
                                 shift_imm
                             ),
@@ -111,7 +111,7 @@ mod interpreter {
                     } => {
                         write!(
                             file,
-                            "{}::<{}, {}, {{MiscAddressing::{}}}>",
+                            "{}::<{}, {}, {{MiscAddressing::{} as u8}}>",
                             match ty {
                                 MiscTransferTy::Ldrh => "ldrh",
                                 MiscTransferTy::Strh => "strh",
@@ -147,7 +147,7 @@ mod interpreter {
                         match offset {
                             WbOff::Reg(shift_ty) => write!(
                                 file,
-                                "{}{}::<{{WbOffTy::Reg({})}}, {}, {{WbAddressing::{}}}>",
+                                "{}{}::<{{WbOffTy::encode_reg({})}}, {}, {{WbAddressing::{} as u8}}>",
                                 load_store,
                                 word_byte,
                                 arm_shift_ty_to_str(shift_ty),
@@ -156,8 +156,8 @@ mod interpreter {
                             ),
                             WbOff::Imm => write!(
                                 file,
-                                "{load_store}{word_byte}::<{{WbOffTy::Imm}}, {offset_upwards}, \
-                                 {{WbAddressing::{addressing}}}>"
+                                "{load_store}{word_byte}::<{{WbOffTy::IMM}}, {offset_upwards}, \
+                                 {{WbAddressing::{addressing} as u8}}>"
                             ),
                         }
                     }
@@ -268,21 +268,21 @@ mod interpreter {
                     Instr::ShiftImm { ty, shift: _ } => {
                         write!(
                             file,
-                            "shift_imm::<{{ShiftImmTy::{}}}>",
+                            "shift_imm::<{{ShiftImmTy::{} as u8}}>",
                             ["Lsl", "Lsr", "Asr"][ty as usize]
                         )
                     }
                     Instr::DpOpImm8 { ty, reg: _ } => {
                         write!(
                             file,
-                            "dp_op_imm8::<{{DpOpImm8Ty::{}}}>",
+                            "dp_op_imm8::<{{DpOpImm8Ty::{} as u8}}>",
                             ["Mov", "Cmp", "Add", "Sub"][ty as usize]
                         )
                     }
                     Instr::DpOpReg(ty) => {
                         write!(
                             file,
-                            "dp_op_reg::<{{DpOpRegTy::{}}}>",
+                            "dp_op_reg::<{{DpOpRegTy::{} as u8}}>",
                             [
                                 "And", "Eor", "Lsl", "Lsr", "Asr", "Adc", "Sbc", "Ror", "Tst",
                                 "Neg", "Cmp", "Cmn", "Orr", "Mul", "Bic", "Mvn",
@@ -451,20 +451,20 @@ mod jit {
                     Instr::DpOp { ty, set_flags, op } => {
                         write!(
                             file,
-                            "dp_op::<_, {{DpOpTy::{}}}, ",
+                            "dp_op::<_, {{DpOpTy::{} as u8}}, ",
                             [
                                 "And", "Eor", "Sub", "Rsb", "Add", "Adc", "Sbc", "Rsc", "Tst",
                                 "Teq", "Cmp", "Cmn", "Orr", "Mov", "Bic", "Mvn",
                             ][ty as usize]
                         )?;
                         match op {
-                            DpOperand::Imm => write!(file, "{{DpOperand::Imm}}"),
+                            DpOperand::Imm => write!(file, "{{DpOperand::IMM}}"),
                             DpOperand::Reg {
                                 shift_ty,
                                 shift_imm,
                             } => write!(
                                 file,
-                                "{{DpOperand::Reg {{ shift_ty: {}, shift_imm: {} }}}}",
+                                "{{DpOperand::encode_reg({}, {})}}",
                                 arm_shift_ty_to_str(shift_ty),
                                 shift_imm
                             ),
@@ -494,7 +494,7 @@ mod jit {
                     } => {
                         write!(
                             file,
-                            "{}::<_, {}, {}, {{MiscAddressing::{}}}>",
+                            "{}::<_, {}, {}, {{MiscAddressing::{} as u8}}>",
                             match ty {
                                 MiscTransferTy::Ldrh => "ldrh",
                                 MiscTransferTy::Strh => "strh",
@@ -530,7 +530,7 @@ mod jit {
                         match offset {
                             WbOff::Reg(shift_ty) => write!(
                                 file,
-                                "{}{}::<_, {{WbOffTy::Reg({})}}, {}, {{WbAddressing::{}}}>",
+                                "{}{}::<_, {{WbOffTy::encode_reg({})}}, {}, {{WbAddressing::{} as u8}}>",
                                 load_store,
                                 word_byte,
                                 arm_shift_ty_to_str(shift_ty),
@@ -539,7 +539,7 @@ mod jit {
                             ),
                             WbOff::Imm => write!(
                                 file,
-                                "{}{}::<_, {{WbOffTy::Imm}}, {}, {{WbAddressing::{}}}>",
+                                "{}{}::<_, {{WbOffTy::IMM}}, {}, {{WbAddressing::{} as u8}}>",
                                 load_store, word_byte, offset_upwards, addressing
                             ),
                         }
@@ -637,21 +637,21 @@ mod jit {
                     Instr::ShiftImm { ty, shift: _ } => {
                         write!(
                             file,
-                            "shift_imm::<_, {{ShiftImmTy::{}}}>",
+                            "shift_imm::<_, {{ShiftImmTy::{} as u8}}>",
                             ["Lsl", "Lsr", "Asr"][ty as usize]
                         )
                     }
                     Instr::DpOpImm8 { ty, reg: _ } => {
                         write!(
                             file,
-                            "dp_op_imm8::<_, {{DpOpImm8Ty::{}}}>",
+                            "dp_op_imm8::<_, {{DpOpImm8Ty::{} as u8}}>",
                             ["Mov", "Cmp", "Add", "Sub"][ty as usize]
                         )
                     }
                     Instr::DpOpReg(ty) => {
                         write!(
                             file,
-                            "dp_op_reg::<_, {{DpOpRegTy::{}}}>",
+                            "dp_op_reg::<_, {{DpOpRegTy::{} as u8}}>",
                             [
                                 "And", "Eor", "Lsl", "Lsr", "Asr", "Adc", "Sbc", "Ror", "Tst",
                                 "Neg", "Cmp", "Cmn", "Orr", "Mul", "Bic", "Mvn",
@@ -804,20 +804,20 @@ mod disasm {
                     Instr::DpOp { ty, set_flags, op } => {
                         write!(
                             file,
-                            "dp_op::<{{DpOpTy::{}}}, ",
+                            "dp_op::<{{DpOpTy::{} as u8}}, ",
                             [
                                 "And", "Eor", "Sub", "Rsb", "Add", "Adc", "Sbc", "Rsc", "Tst",
                                 "Teq", "Cmp", "Cmn", "Orr", "Mov", "Bic", "Mvn",
                             ][ty as usize]
                         )?;
                         match op {
-                            DpOperand::Imm => write!(file, "{{DpOperand::Imm}}"),
+                            DpOperand::Imm => write!(file, "{{DpOperand::IMM}}"),
                             DpOperand::Reg {
                                 shift_ty,
                                 shift_imm,
                             } => write!(
                                 file,
-                                "{{DpOperand::Reg {{ shift_ty: {}, shift_imm: {} }}}}",
+                                "{{DpOperand::encode_reg({}, {})}}",
                                 arm_shift_ty_to_str(shift_ty),
                                 shift_imm
                             ),
@@ -841,15 +841,15 @@ mod disasm {
                     } => {
                         write!(
                             file,
-                            "load_store_misc::<{}, {{{}}}, {}, {}, {{MiscAddressing::{}}}>",
+                            "load_store_misc::<{}, {{{}}}, {}, {}, {{MiscAddressing::{} as u8}}>",
                             !matches!(ty, MiscTransferTy::Strh | MiscTransferTy::Strd),
                             match ty {
-                                MiscTransferTy::Ldrh => "LoadStoreMiscTy::Half",
-                                MiscTransferTy::Strh => "LoadStoreMiscTy::Half",
-                                MiscTransferTy::Ldrd => "LoadStoreMiscTy::Double",
-                                MiscTransferTy::Strd => "LoadStoreMiscTy::Double",
-                                MiscTransferTy::Ldrsb => "LoadStoreMiscTy::SignedByte",
-                                MiscTransferTy::Ldrsh => "LoadStoreMiscTy::SignedHalf",
+                                MiscTransferTy::Ldrh => "LoadStoreMiscTy::Half as u8",
+                                MiscTransferTy::Strh => "LoadStoreMiscTy::Half as u8",
+                                MiscTransferTy::Ldrd => "LoadStoreMiscTy::Double as u8",
+                                MiscTransferTy::Strd => "LoadStoreMiscTy::Double as u8",
+                                MiscTransferTy::Ldrsb => "LoadStoreMiscTy::SignedByte as u8",
+                                MiscTransferTy::Ldrsh => "LoadStoreMiscTy::SignedHalf as u8",
                             },
                             offset_imm,
                             offset_upwards,
@@ -876,8 +876,8 @@ mod disasm {
                         match offset {
                             WbOff::Reg(shift_ty) => write!(
                                 file,
-                                "load_store_wb::<{}, {}, {{WbOffTy::Reg({})}}, {}, \
-                                 {{WbAddressing::{}}}>",
+                                "load_store_wb::<{}, {}, {{WbOffTy::encode_reg({})}}, {}, \
+                                 {{WbAddressing::{} as u8}}>",
                                 load,
                                 byte,
                                 arm_shift_ty_to_str(shift_ty),
@@ -886,8 +886,8 @@ mod disasm {
                             ),
                             WbOff::Imm => write!(
                                 file,
-                                "load_store_wb::<{}, {}, {{WbOffTy::Imm}}, {}, \
-                                 {{WbAddressing::{}}}>",
+                                "load_store_wb::<{}, {}, {{WbOffTy::IMM}}, {}, \
+                                 {{WbAddressing::{} as u8}}>",
                                 load, byte, offset_upwards, addressing
                             ),
                         }
@@ -972,21 +972,21 @@ mod disasm {
                     Instr::ShiftImm { ty, shift: _ } => {
                         write!(
                             file,
-                            "shift_imm::<{{ShiftImmTy::{}}}>",
+                            "shift_imm::<{{ShiftImmTy::{} as u8}}>",
                             ["Lsl", "Lsr", "Asr"][ty as usize]
                         )
                     }
                     Instr::DpOpImm8 { ty, reg: _ } => {
                         write!(
                             file,
-                            "dp_op_imm8::<{{DpOpImm8Ty::{}}}>",
+                            "dp_op_imm8::<{{DpOpImm8Ty::{} as u8}}>",
                             ["Mov", "Cmp", "Add", "Sub"][ty as usize]
                         )
                     }
                     Instr::DpOpReg(ty) => {
                         write!(
                             file,
-                            "dp_op_reg::<{{DpOpRegTy::{}}}>",
+                            "dp_op_reg::<{{DpOpRegTy::{} as u8}}>",
                             [
                                 "And", "Eor", "Lsl", "Lsr", "Asr", "Adc", "Sbc", "Ror", "Tst",
                                 "Neg", "Cmp", "Cmn", "Orr", "Mul", "Bic", "Mvn",
@@ -1002,7 +1002,7 @@ mod disasm {
                     Instr::DpOpSpecial { ty, h1: _, h2: _ } => {
                         write!(
                             file,
-                            "dp_op_special::<{{DpOpSpecialTy::{}}}>",
+                            "dp_op_special::<{{DpOpSpecialTy::{} as u8}}>",
                             ["Add", "Cmp", "Mov"][ty as usize]
                         )
                     }
@@ -1013,7 +1013,10 @@ mod disasm {
                         let ty = [
                             "Str", "Strh", "Strb", "Ldrsb", "Ldr", "Ldrh", "Ldrb", "Ldrsh",
                         ][ty as usize];
-                        write!(file, "ldr_str::<{{ThumbLoadStoreTy::{ty}}}, 0, false>")
+                        write!(
+                            file,
+                            "ldr_str::<{{ThumbLoadStoreTy::{ty} as u8}}, 0, false>"
+                        )
                     }
                     Instr::LoadStoreWbImm {
                         byte,
@@ -1022,7 +1025,7 @@ mod disasm {
                     } => {
                         write!(
                             file,
-                            "ldr_str::<{{ThumbLoadStoreTy::{}{}}}, {}, true>",
+                            "ldr_str::<{{ThumbLoadStoreTy::{}{} as u8}}, {}, true>",
                             if load { "Ldr" } else { "Str" },
                             if byte { "b" } else { "" },
                             if byte { 0 } else { 2 },
@@ -1031,7 +1034,7 @@ mod disasm {
                     Instr::LoadStoreHalfImm { load, offset: _ } => {
                         write!(
                             file,
-                            "ldr_str::<{{ThumbLoadStoreTy::{}h}}, 1, true>",
+                            "ldr_str::<{{ThumbLoadStoreTy::{}h as u8}}, 1, true>",
                             if load { "Ldr" } else { "Str" }
                         )
                     }

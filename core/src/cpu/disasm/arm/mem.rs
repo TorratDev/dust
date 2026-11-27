@@ -7,9 +7,9 @@ use core::fmt::Write;
 pub(super) fn load_store_wb<
     const LOAD: bool,
     const BYTE: bool,
-    const OFF_TY: WbOffTy,
+    const OFF_TY: u8,
     const UPWARDS: bool,
-    const ADDRESSING: WbAddressing,
+    const ADDRESSING: u8,
 >(
     ctx: &mut Context,
     instr: u32,
@@ -21,17 +21,17 @@ pub(super) fn load_store_wb<
         "{}{cond}{}{} r{src_dst_reg}, [r{base_reg}",
         if LOAD { "ldr" } else { "str" },
         if BYTE { "b" } else { "" },
-        if ADDRESSING == WbAddressing::PostUser {
+        if WbAddressing::from_u8(ADDRESSING) == WbAddressing::PostUser {
             "t"
         } else {
             ""
         },
     );
-    if !ADDRESSING.preincrement() {
+    if !WbAddressing::from_u8(ADDRESSING).preincrement() {
         ctx.next_instr.opcode.push(']');
     }
     let offset_sign = if UPWARDS { "" } else { "-" };
-    match OFF_TY {
+    match WbOffTy::from_u8(OFF_TY) {
         WbOffTy::Imm => {
             let offset = instr & 0xFFF;
             if offset != 0 {
@@ -59,14 +59,15 @@ pub(super) fn load_store_wb<
             };
         }
     }
-    if ADDRESSING.preincrement() {
+    if WbAddressing::from_u8(ADDRESSING).preincrement() {
         ctx.next_instr.opcode.push(']');
-        if ADDRESSING.writeback() {
+        if WbAddressing::from_u8(ADDRESSING).writeback() {
             ctx.next_instr.opcode.push('!');
         }
     }
     if (BYTE && src_dst_reg == 15)
-        || (ADDRESSING.writeback() && (base_reg == src_dst_reg || base_reg == 15))
+        || (WbAddressing::from_u8(ADDRESSING).writeback()
+            && (base_reg == src_dst_reg || base_reg == 15))
     {
         "Unpredictable".clone_into(&mut ctx.next_instr.comment);
     }
@@ -74,10 +75,10 @@ pub(super) fn load_store_wb<
 
 pub(super) fn load_store_misc<
     const LOAD: bool,
-    const TY: LoadStoreMiscTy,
+    const TY: u8,
     const OFF_IMM: bool,
     const UPWARDS: bool,
-    const ADDRESSING: MiscAddressing,
+    const ADDRESSING: u8,
 >(
     ctx: &mut Context,
     instr: u32,
@@ -88,14 +89,14 @@ pub(super) fn load_store_misc<
     ctx.next_instr.opcode = format!(
         "{}{cond}{} r{src_dst_reg}, [r{base_reg}",
         if LOAD { "ldr" } else { "str" },
-        match TY {
+        match LoadStoreMiscTy::from_u8(TY) {
             LoadStoreMiscTy::Half => "h",
             LoadStoreMiscTy::Double => "d",
             LoadStoreMiscTy::SignedByte => "sb",
             LoadStoreMiscTy::SignedHalf => "sh",
         }
     );
-    if !ADDRESSING.preincrement() {
+    if !MiscAddressing::from_u8(ADDRESSING).preincrement() {
         ctx.next_instr.opcode.push(']');
     }
     let offset_sign = if UPWARDS { "" } else { "-" };
@@ -108,16 +109,17 @@ pub(super) fn load_store_misc<
         let off_reg = instr & 0xF;
         let _ = write!(ctx.next_instr.opcode, ", {offset_sign}r{off_reg}");
     }
-    if ADDRESSING.preincrement() {
+    if MiscAddressing::from_u8(ADDRESSING).preincrement() {
         ctx.next_instr.opcode.push(']');
-        if ADDRESSING.writeback() {
+        if MiscAddressing::from_u8(ADDRESSING).writeback() {
             ctx.next_instr.opcode.push('!');
         }
     }
     if src_dst_reg == 15
         || (!OFF_IMM && instr & 0xF00 != 0)
-        || (ADDRESSING.writeback() && (base_reg == src_dst_reg || base_reg == 15))
-        || (TY == LoadStoreMiscTy::Double && src_dst_reg & 1 != 0)
+        || (MiscAddressing::from_u8(ADDRESSING).writeback()
+            && (base_reg == src_dst_reg || base_reg == 15))
+        || (LoadStoreMiscTy::from_u8(TY) == LoadStoreMiscTy::Double && src_dst_reg & 1 != 0)
     {
         "Unpredictable".clone_into(&mut ctx.next_instr.comment);
     }

@@ -1,12 +1,7 @@
-use core::simd::{
-    cmp::{SimdPartialEq, SimdPartialOrd},
-    i32x2, i64x2,
-    num::{SimdInt, SimdUint},
-    u32x4, u64x4,
-};
 use dust_core::gpu::engine_3d::{
     InterpColor, PolyVertIndex, PolyVertsLen, Polygon, ScreenVertex, TexCoords, VertexAddr,
 };
+use dust_core::utils::simd::{i32x2, i64x2, u32x4, u64x4};
 
 pub fn clip_x_range((start, end): (u16, u16)) -> (u8, u8) {
     if start > 255 {
@@ -322,22 +317,16 @@ impl<const EDGE: bool> InterpLineData<EDGE> {
         let l_factor = (
             x,
             len,
-            if len == 0 {
-                0
-            } else {
-                (1 << LINEAR_PRECISION) / len as u32
-            },
+            (1_u32 << LINEAR_PRECISION)
+                .checked_div(u32::from(len))
+                .unwrap_or(0),
         );
         let p_factor = {
             let numer = (x as u32 * self.p_w0_numer as u32) << Self::PERSP_PRECISION;
             let denom =
                 x as u32 * self.p_w0_denom as u32 + (len - x) as u32 * self.p_w1_denom as u32;
-            if denom == 0 {
-                // TODO: ???
-                0
-            } else {
-                (numer / denom) as u16
-            }
+            // TODO: What should happen when the denominator is zero?
+            numer.checked_div(denom).unwrap_or(0) as u16
         };
         InterpData {
             l_factor,

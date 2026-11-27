@@ -1,4 +1,5 @@
 use super::super::{add_cycles, reload_pipeline};
+use crate::utils::unlikely;
 use crate::{
     cpu::{
         arm7::bus,
@@ -8,7 +9,6 @@ use crate::{
     emu::Emu,
     utils::schedule::RawTimestamp,
 };
-use core::intrinsics::unlikely;
 
 pub fn ldr<const IMM: bool>(emu: &mut Emu<Interpreter>, instr: u16) {
     let addr = reg!(emu.arm7, instr >> 3 & 7).wrapping_add(if IMM {
@@ -197,7 +197,7 @@ pub fn pop<const POP_R15: bool>(emu: &mut Emu<Interpreter>, instr: u16) {
         let cycles = emu.arm7.bus_timings.get(cur_addr).n32;
         add_cycles(emu, cycles as RawTimestamp + 1);
         reg!(emu.arm7, 15) = result;
-        return reload_pipeline::<{ StateSource::Thumb }>(emu);
+        return reload_pipeline::<{ StateSource::Thumb as u8 }>(emu);
     }
     #[allow(unused_mut)]
     let mut timings = emu.arm7.bus_timings.get(cur_addr);
@@ -226,7 +226,7 @@ pub fn pop<const POP_R15: bool>(emu: &mut Emu<Interpreter>, instr: u16) {
         let result = bus::read_32::<CpuAccess, _>(emu, cur_addr);
         add_cycles(emu, access_cycles as RawTimestamp + 1);
         reg!(emu.arm7, 15) = result;
-        reload_pipeline::<{ StateSource::Thumb }>(emu);
+        reload_pipeline::<{ StateSource::Thumb as u8 }>(emu);
     } else {
         reg!(emu.arm7, 13) = cur_addr;
         add_cycles(emu, 1);
@@ -244,7 +244,7 @@ pub fn ldmia(emu: &mut Emu<Interpreter>, instr: u16) {
         let cycles = emu.arm7.bus_timings.get(cur_addr).n32;
         add_cycles(emu, cycles as RawTimestamp + 1);
         reg!(emu.arm7, 15) = result;
-        return reload_pipeline::<{ StateSource::Thumb }>(emu);
+        return reload_pipeline::<{ StateSource::Thumb as u8 }>(emu);
     }
     reg!(emu.arm7, base_reg) = cur_addr.wrapping_add((instr as u8).count_ones() << 2);
     #[allow(unused_mut)]

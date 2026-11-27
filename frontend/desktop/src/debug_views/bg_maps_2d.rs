@@ -1095,7 +1095,7 @@ impl FrameView for BgMaps2d {
                                 if data.bg.mode == BgResolvedFetchMode::Text16
                                     || data.bg.mode.uses_ext_pal() == Some(true)
                                 {
-                                    ui.text(format!("Palette number: {:#03X}", tile >> 12));
+                                    ui.text(format!("Palette number: {:#X}", tile >> 12));
                                 }
                             }
                             ui.text(format!("X: {}, Y: {}", cell_pos[0] * 8, cell_pos[1] * 8));

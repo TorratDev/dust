@@ -19,8 +19,7 @@ pub fn regs_32(
 ) {
     let reg_32_bit_width = style!(ui, frame_padding)[0] * 2.0 + ui.calc_text_size("00000000")[0];
     let max_digits = (start_i + values.len()).max(1).ilog10();
-    let mut i = start_i;
-    for value in values {
+    for (i, value) in (start_i..).zip(values) {
         f(i);
         ui.align_text_to_frame_padding();
         ui.text(label(i, max_digits));
@@ -38,7 +37,6 @@ pub fn regs_32(
                 change(i, new_value);
             }
         }
-        i += 1;
     }
 }
 

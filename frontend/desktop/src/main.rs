@@ -1,6 +1,4 @@
-#![feature(step_trait, slice_ptr_get, rustc_attrs)]
 #![warn(clippy::all)]
-#![allow(internal_features)]
 
 #[cfg(target_os = "macos")]
 #[macro_use]

@@ -55,13 +55,13 @@ pub fn add_sub_reg_imm3<const SUB: bool, const IMM3: bool, const IS_MOV: bool>(
     prefetch_thumb::<true, true>(emu);
 }
 
-pub fn shift_imm<const SHIFT_TY: ShiftImmTy>(emu: &mut Emu<Interpreter>, instr: u16) {
+pub fn shift_imm<const SHIFT_TY: u8>(emu: &mut Emu<Interpreter>, instr: u16) {
     let src_reg = (instr >> 3 & 7) as u8;
     apply_reg_interlock_1::<false>(emu, src_reg);
     add_bus_cycles(emu, 1);
     let src = reg!(emu.arm9, src_reg);
     let shift = (instr >> 6 & 0x1F) as u8;
-    let result = match SHIFT_TY {
+    let result = match ShiftImmTy::from_u8(SHIFT_TY) {
         ShiftImmTy::Lsl => shifts::lsl_imm_s(&mut emu.arm9.engine_data.regs, src, shift),
         ShiftImmTy::Lsr => shifts::lsr_imm_s(&mut emu.arm9.engine_data.regs, src, shift),
         ShiftImmTy::Asr => shifts::asr_imm_s(&mut emu.arm9.engine_data.regs, src, shift),
@@ -71,15 +71,15 @@ pub fn shift_imm<const SHIFT_TY: ShiftImmTy>(emu: &mut Emu<Interpreter>, instr: 
     prefetch_thumb::<true, true>(emu);
 }
 
-pub fn dp_op_imm8<const OP_TY: DpOpImm8Ty>(emu: &mut Emu<Interpreter>, instr: u16) {
+pub fn dp_op_imm8<const OP_TY: u8>(emu: &mut Emu<Interpreter>, instr: u16) {
     let src_dst_reg = (instr >> 8 & 7) as u8;
-    if OP_TY != DpOpImm8Ty::Mov {
+    if DpOpImm8Ty::from_u8(OP_TY) != DpOpImm8Ty::Mov {
         apply_reg_interlock_1::<false>(emu, src_dst_reg);
     }
     let op = instr as u8 as u32;
     add_bus_cycles(emu, 1);
     let src = reg!(emu.arm9, src_dst_reg);
-    match OP_TY {
+    match DpOpImm8Ty::from_u8(OP_TY) {
         DpOpImm8Ty::Mov => {
             emu.arm9.engine_data.regs.cpsr = emu
                 .arm9
@@ -103,23 +103,24 @@ pub fn dp_op_imm8<const OP_TY: DpOpImm8Ty>(emu: &mut Emu<Interpreter>, instr: u1
     prefetch_thumb::<true, true>(emu);
 }
 
-pub fn dp_op_reg<const OP_TY: DpOpRegTy>(emu: &mut Emu<Interpreter>, instr: u16) {
+pub fn dp_op_reg<const OP_TY: u8>(emu: &mut Emu<Interpreter>, instr: u16) {
     let src_dst_reg = (instr & 7) as u8;
     let op_reg = (instr >> 3 & 7) as u8;
     let src = reg!(emu.arm9, src_dst_reg);
     let op = reg!(emu.arm9, op_reg);
-    if OP_TY.is_unary() {
+    if DpOpRegTy::from_u8(OP_TY).is_unary() {
         apply_reg_interlock_1::<false>(emu, op_reg);
-    } else if OP_TY.is_shift() {
+    } else if DpOpRegTy::from_u8(OP_TY).is_shift() {
         apply_reg_interlocks_2::<1, false>(emu, src_dst_reg, op_reg);
     } else {
         apply_reg_interlocks_2::<0, false>(emu, src_dst_reg, op_reg);
     }
     add_bus_cycles(
         emu,
-        (1 + (OP_TY.is_shift() || OP_TY == DpOpRegTy::Mul) as u8) as RawTimestamp,
+        (1 + (DpOpRegTy::from_u8(OP_TY).is_shift() || DpOpRegTy::from_u8(OP_TY) == DpOpRegTy::Mul)
+            as u8) as RawTimestamp,
     );
-    match OP_TY {
+    match DpOpRegTy::from_u8(OP_TY) {
         DpOpRegTy::And => {
             let result = bit_ops::and_s(&mut emu.arm9.engine_data.regs, src, op);
             write_reg_clear_interlock_ab(emu, src_dst_reg, result);
@@ -220,7 +221,7 @@ pub fn add_special(emu: &mut Emu<Interpreter>, instr: u16) {
     write_reg_clear_interlock_ab(emu, src_dst_reg, result);
     if src_dst_reg == 15 {
         add_bus_cycles(emu, 2);
-        reload_pipeline::<{ StateSource::Thumb }>(emu);
+        reload_pipeline::<{ StateSource::Thumb as u8 }>(emu);
     } else {
         add_bus_cycles(emu, 1);
     }
@@ -245,7 +246,7 @@ pub fn mov_special(emu: &mut Emu<Interpreter>, instr: u16) {
     write_reg_clear_interlock_ab(emu, dst_reg, op);
     if dst_reg == 15 {
         add_bus_cycles(emu, 2);
-        reload_pipeline::<{ StateSource::Thumb }>(emu);
+        reload_pipeline::<{ StateSource::Thumb as u8 }>(emu);
     } else {
         add_bus_cycles(emu, 1);
     }

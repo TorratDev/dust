@@ -141,7 +141,15 @@ impl Titles {
                     .position(|c| *c == [0; 2])
                     .unwrap_or(bytes.len())
                     << 1;
-                String::from_utf16le(&bytes[..end_index]).map_err(|_| Box::new(bytes))
+                String::from_utf16(
+                    &bytes[..end_index]
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|c| u16::from_le_bytes(*c))
+                        .collect::<Vec<_>>(),
+                )
+                .map_err(|_| Box::new(bytes))
             }};
         }
 

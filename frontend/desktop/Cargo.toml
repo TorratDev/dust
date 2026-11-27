@@ -33,7 +33,7 @@ xq-audio = ["dust-core/xq-audio"]
 
 [dependencies]
 dust-core = { path = "../../core", features = ["serde"] }
-emu-utils = { git = "https://github.com/kelpsyberry/emu-utils", features = ["triple-buffer", "app"] }
+emu-utils = { path = "../../utils/emu-utils", features = ["triple-buffer", "app"] }
 dust-soft-2d = { path = "../../render/soft-2d", features = ["threaded"] }
 dust-soft-3d = { path = "../../render/soft-3d" }
 dust-wgpu-2d = { path = "../../render/wgpu-2d" }
@@ -66,7 +66,7 @@ miniz_oxide = { version = "0.8", features = ["simd"] }
 png = { version = "0.17", optional = true }
 fatfs = { version = "0.3", optional = true }
 tempfile = { version = "3.10", optional = true }
-proc-bitfield = { version = "0.5", features = ["nightly"] }
+proc-bitfield = "0.5"
 
 # Config
 serde = { version = "1.0", features = ["derive"] }

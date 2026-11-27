@@ -2,12 +2,12 @@ use super::super::{
     super::Interpreter, enter_hle_irq, enter_hle_swi, handle_swi, handle_undefined,
     reload_pipeline, return_from_hle_irq, set_cpsr_update_control, StateSource,
 };
+use crate::utils::unlikely;
 use crate::{
     cpu::{arm7::bus, bus::CpuAccess, hle_bios, psr::Psr},
     dldi,
     emu::Emu,
 };
-use core::intrinsics::unlikely;
 
 pub fn nop(emu: &mut Emu<Interpreter>, _instr: u32) {
     inc_r15!(emu.arm7, 4);
@@ -106,7 +106,7 @@ pub fn undefined<const MAYBE_HLE_BIOS_CALL: bool, const MAYBE_DLDI_CALL: bool>(
                 [reg!(emu.arm7, 0), reg!(emu.arm7, 1), reg!(emu.arm7, 2)],
             ) as u32;
             reg!(emu.arm7, 15) = reg!(emu.arm7, 14);
-            reload_pipeline::<{ StateSource::R15Bit0 }>(emu);
+            reload_pipeline::<{ StateSource::R15Bit0 as u8 }>(emu);
             return;
         }
     }

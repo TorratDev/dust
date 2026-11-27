@@ -1,6 +1,5 @@
-#![feature(portable_simd)]
 #![warn(clippy::all)]
-#![allow(incomplete_features, clippy::missing_safety_doc)]
+#![allow(clippy::missing_safety_doc)]
 
 pub mod capture;
 mod impls;
