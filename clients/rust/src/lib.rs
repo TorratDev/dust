@@ -18,7 +18,8 @@ pub mod pb {
 }
 
 pub use pb::{
-    Button, Control, Cpu, Image, ImageFormat, MemRange, Regs, SaveFormat, StateBytes, WatchChange,
+    Button, Control, Cpu, EmuStats, Image, ImageFormat, Instruction, LogEntry, LogLevel, MemRange,
+    MemoryRegion, Regs, SaveFormat, StateBytes, WatchChange,
 };
 
 use pb::dust_agent_client::DustAgentClient;
@@ -672,6 +673,93 @@ impl Session {
             })
             .await?;
         Ok(())
+    }
+
+    /// The named regions [`Session::dump`] accepts: RAM, VRAM banks, palettes, OAM and I/O.
+    pub async fn memory_map(&self) -> Result<Vec<MemoryRegion>> {
+        Ok(self
+            .client
+            .grpc()
+            .memory_map(self.request())
+            .await?
+            .into_inner()
+            .regions)
+    }
+
+    /// The contents of a region from [`Session::memory_map`], by name (e.g. `"main_ram"`).
+    pub async fn dump(&self, region: &str) -> Result<Vec<u8>> {
+        Ok(self
+            .client
+            .grpc()
+            .dump(pb::DumpRequest {
+                session_id: self.id.clone(),
+                region: region.to_owned(),
+            })
+            .await?
+            .into_inner()
+            .data)
+    }
+
+    /// Disassembles `count` ARM (or Thumb) instructions from `addr` as `cpu` sees memory.
+    pub async fn disasm(
+        &self,
+        cpu: Cpu,
+        addr: u32,
+        count: u32,
+        thumb: bool,
+    ) -> Result<Vec<Instruction>> {
+        Ok(self
+            .client
+            .grpc()
+            .disasm(pb::DisasmRequest {
+                session_id: self.id.clone(),
+                cpu: cpu as i32,
+                addr,
+                count,
+                thumb,
+            })
+            .await?
+            .into_inner()
+            .instructions)
+    }
+
+    /// Emulator health over the last `window` frames (0 = the server's default).
+    pub async fn stats(&self, window: u32) -> Result<EmuStats> {
+        Ok(self
+            .client
+            .grpc()
+            .stats(pb::StatsRequest {
+                session_id: self.id.clone(),
+                window,
+            })
+            .await?
+            .into_inner())
+    }
+
+    /// Core diagnostics with `seq > since` and at least `min_level`. Pass the last entry's `seq`
+    /// as `since` to poll for new ones.
+    pub async fn logs(&self, since: u64, min_level: LogLevel) -> Result<Vec<LogEntry>> {
+        Ok(self
+            .client
+            .grpc()
+            .logs(pb::LogsRequest {
+                session_id: self.id.clone(),
+                since,
+                min_level: min_level as i32,
+            })
+            .await?
+            .into_inner()
+            .entries)
+    }
+
+    /// A stream of the session's events (currently new log entries) from now on.
+    pub async fn events(&self) -> Result<tonic::Streaming<pb::Event>> {
+        Ok(self
+            .client
+            .grpc()
+            .events(self.request())
+            .await?
+            .into_inner())
     }
 
     /// Ends the session on the server.

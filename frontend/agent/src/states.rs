@@ -149,15 +149,18 @@ fn write_file(path: &Path, data: &[u8]) -> Result<(), Error> {
 }
 
 /// Builds the cartridge SPI device for a save of `len` bytes (dust's save types, by size).
-pub(crate) fn spi_for_save(contents: SaveContents) -> Result<Spi, Error> {
+pub(crate) fn spi_for_save(contents: SaveContents, logger: &slog::Logger) -> Result<Spi, Error> {
     let len = contents.len();
     let invalid = || Error::InvalidSave(format!("unsupported save size: {len} B"));
+    let logger = logger.new(slog::o!("ds_spi" => ""));
     Ok(match len {
-        0x200 => Eeprom4k::new(contents, None).map_err(|_| invalid())?.into(),
-        0x2000 | 0x1_0000 | 0x2_0000 => EepromFram::new(contents, None)
+        0x200 => Eeprom4k::new(contents, None, logger)
             .map_err(|_| invalid())?
             .into(),
-        0x4_0000 | 0x8_0000 | 0x10_0000 => Flash::new(contents, [0; 20], false)
+        0x2000 | 0x1_0000 | 0x2_0000 => EepromFram::new(contents, None, logger)
+            .map_err(|_| invalid())?
+            .into(),
+        0x4_0000 | 0x8_0000 | 0x10_0000 => Flash::new(contents, [0; 20], false, logger)
             .map_err(|_| invalid())?
             .into(),
         _ => return Err(invalid()),
@@ -243,7 +246,7 @@ impl Session {
                 .spi
                 .reload_contents(SaveReloadContents::Existing(save));
         } else {
-            self.emu.ds_slot.spi = spi_for_save(SaveContents::Existing(save))?;
+            self.emu.ds_slot.spi = spi_for_save(SaveContents::Existing(save), &self.logger)?;
         }
         Ok(())
     }
@@ -342,7 +345,7 @@ impl Session {
     pub fn import_save(&mut self, path: impl AsRef<Path>) -> Result<(), Error> {
         let save = read_save_file(path.as_ref())?;
         // Validate the size before touching the emulator.
-        spi_for_save(SaveContents::New(save.len()))?;
+        spi_for_save(SaveContents::New(save.len()), &self.logger)?;
         self.inputs.save = Some(save.clone());
         self.put_save(save)
     }

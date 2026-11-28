@@ -6,6 +6,7 @@
 
 mod input;
 pub mod memory;
+pub mod observe;
 mod rtc;
 mod screen;
 mod session;
@@ -14,6 +15,7 @@ mod states;
 
 pub use input::{keys_from_desmume_mask, InputStep, Keys, LID_CLOSED, TOUCH_HEIGHT, TOUCH_WIDTH};
 pub use memory::{Cpu, Regs, WatchChange};
+pub use observe::{Instruction, LogEntry, LogLevel, MemoryRegion, Stats};
 pub use screen::{Image, ImageFormat, SCREENSHOT_HEIGHT, SCREENSHOT_WIDTH};
 pub use session::{Control, Error, Session, SessionOptions, Status, StepResult};
 pub use states::{SaveFormat, StateBytes};

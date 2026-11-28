@@ -1100,6 +1100,11 @@ mod disasm {
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    // Tells dependents' build scripts (as `DEP_DUST_CORE_LOG`) whether the constructors take
+    // loggers, since another crate in the same build can enable the `log` feature.
+    if env::var_os("CARGO_FEATURE_LOG").is_some() {
+        println!("cargo:log=1");
+    }
     interpreter::output_instr_tables();
     #[cfg(feature = "jit")]
     jit::output_instr_tables();

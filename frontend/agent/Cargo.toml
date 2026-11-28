@@ -6,9 +6,10 @@ publish = false
 description = "Programmatic control API over dust's emulator core (Session)"
 
 [dependencies]
-dust-core = { path = "../../core" }
+dust-core = { path = "../../core", features = ["log", "disasm"] }
 dust-soft-2d = { path = "../../render/soft-2d" }
 dust-soft-3d = { path = "../../render/soft-3d" }
 chrono = "0.4"
 miniz_oxide = "0.8"
 png = "0.17"
+slog = "2.7"

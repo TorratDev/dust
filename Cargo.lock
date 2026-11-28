@@ -1025,6 +1025,7 @@ dependencies = [
  "dust-soft-3d",
  "miniz_oxide",
  "png",
+ "slog",
 ]
 
 [[package]]

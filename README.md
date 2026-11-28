@@ -30,6 +30,29 @@
 | macOS x86_64 binary | [macOS-x86_64.zip](https://nightly.link/kelpsyberry/dust/workflows/build-release/main/macOS-x86_64.zip) | [macOS-x86_64-debug.zip](https://nightly.link/kelpsyberry/dust/workflows/build-release/main/macOS-x86_64-debug.zip) | [macOS-x86_64-debug-gdb.zip](https://nightly.link/kelpsyberry/dust/workflows/build-release/main/macOS-x86_64-debug-gdb.zip) |
 | macOS ARM64 binary | [macOS-aarch64.zip](https://nightly.link/kelpsyberry/dust/workflows/build-release/main/macOS-aarch64.zip) | [macOS-aarch64-debug.zip](https://nightly.link/kelpsyberry/dust/workflows/build-release/main/macOS-aarch64-debug.zip) | [macOS-aarch64-debug-gdb.zip](https://nightly.link/kelpsyberry/dust/workflows/build-release/main/macOS-aarch64-debug-gdb.zip) |
 
+## Debugging build
+
+To build the desktop frontend from source with the debugging features of the "Debugging" binaries above:
+
+```bash
+cargo release-debug
+```
+
+This is an alias (see `.cargo/config.toml`) for `cargo build --release -p dust-desktop --features log,debug-views`; the binary is `target/release/dust-desktop`. The Debug menu then has:
+
+- CPU state (registers) and memory editors for the ARM7 and ARM9, and a disassembly view for each
+- 2D BG maps and palettes, audio channels, DS ROM info and the cartridge file system
+- A log window with the emulated system's diagnostics (invalid I/O accesses, unimplemented features...)
+
+## Agent observability
+
+`dust-headless` serves the same information over gRPC (`proto/dust_agent.proto`, client in `clients/rust`):
+
+- `MemoryMap` / `Dump`: named regions (`main_ram`, `shared_wram`, `arm7_wram`, `vram_a`-`vram_i`, `palettes`, `oam`, `arm9_io`, `arm7_io`) and their contents
+- `Disasm`: the disassembly view's output for any address, CPU and ARM/Thumb state
+- `Stats`: emulation FPS and speed, frame time average/max, late frames, dropped 3D frames, total frames, the last 3D frame's polygon/vertex counts and RAM overflow, and the geometry FIFO level
+- `Logs` / `Events`: the core's diagnostics (the log window's contents), each with a sequence number, the frame it happened on, its level and the logging component (e.g. `cpu = "arm9"`). Entries carry a formatted message and that component only; there are no other structured fields. The agent's own memory reads and writes don't log.
+
 ## Credits
 - Martin Korth, for summarizing resources on the DS on [GBATEK](https://problemkaputt.de/gbatek.htm)
 - [Arisotura](https://github.com/Arisotura), for her research on the system in melonDS, [test ROMs](https://github.com/Arisotura/arm7wrestler) and [corrections and additions to the info on GBATEK](https://melonds.kuribo64.net/board/thread.php?id=13), and for the game database used in this emulator
