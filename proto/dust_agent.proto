@@ -52,7 +52,7 @@ service DustAgent {
   rpc WatchWriteAdd(WatchWriteAddRequest) returns (HookId);
   rpc WatchWriteRemove(HookRequest) returns (Empty);
   // Breakpoint/watchpoint hits, logs and control changes. After a hit the emulator waits for
-  // Continue. Currently streams new log entries only.
+  // Continue. Control changes aren't sent yet.
   rpc Events(SessionRequest) returns (stream Event);
   rpc Continue(SessionRequest) returns (Empty);
 

@@ -3,7 +3,7 @@ name = "dust-core"
 version = "0.0.0"
 edition = "2021"
 publish = false
-# No native library: only lets dependents' build scripts read `DEP_DUST_CORE_LOG` (see build.rs).
+# No native library: only lets dependents' build scripts read `DEP_DUST_CORE_*` (see build.rs).
 links = "dust_core"
 
 [features]

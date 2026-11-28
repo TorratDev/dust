@@ -6,6 +6,14 @@
 # direct boot (no BIOS or firmware dump needed); it has no Nintendo logo, so it can't boot
 # through the firmware.
 #
+# Generated ROM layout (tests rely on it):
+#   ARM9, entry 0x02000000: stores 0x5A as a word at 0x02001000 once (the `str` is at
+#   0x02000008), then starts an immediate 32-bit DMA3 copy of that word to 0x02001004 (registers
+#   written by the `stmia` at 0x02000018), then spins with `b .` at 0x0200001C.
+#   ARM7, entry 0x02380000: spins with `b .`.
+# The header's ROM version byte (0x01E) is the generator version; an existing generated ROM with
+# an older version is regenerated.
+#
 # To use a different homebrew ROM instead, download it:
 #   DUST_TEST_ROM_URL=https://example.org/homebrew.nds \
 #   DUST_TEST_ROM_SHA256=<sha256> tools/fetch_test_rom.sh
@@ -17,9 +25,17 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out_dir="$root/tests/roms"
 out="$out_dir/test.nds"
 
+generator_version=2
+
 if [[ -f "$out" && "${1:-}" != "--force" ]]; then
-    echo "$out already exists (pass --force to replace it)"
-    exit 0
+    game_code="$(dd if="$out" bs=1 skip=$((0x00C)) count=4 status=none)"
+    rom_version="$(od -An -tu1 -j $((0x01E)) -N 1 "$out" | tr -d ' ')"
+    if [[ -n "${DUST_TEST_ROM_URL:-}" || "$game_code" != "DUST" \
+        || "$rom_version" == "$generator_version" ]]; then
+        echo "$out already exists (pass --force to replace it)"
+        exit 0
+    fi
+    echo "$out was made by an older version of this script; regenerating it"
 fi
 mkdir -p "$out_dir"
 tmp="$(mktemp "$out_dir/.test.nds.XXXXXX")"
@@ -52,27 +68,43 @@ le16() {
 rom_size=$((0x20000)) # 128 KiB, device capacity 0
 arm9_offset=$((0x200))
 arm9_addr=$((0x02000000))
-arm7_offset=$((0x210))
+arm7_offset=$((0x240))
 arm7_addr=$((0x02380000))
 # ARM `b .` (branch to self).
 spin_loop=$((0xEAFFFFFE))
+# ARM9 program:
+#   ldr r0, =0x02001000; mov r1, #0x5A; str r1, [r0]
+#   ldr r2, =0x040000D4; add r3, r0, #4; ldr r4, =0x84000001
+#   stmia r2, {r0, r3, r4}   @ DMA3 source, destination, control (enable, 32-bit, 1 word)
+#   b .
+#   literal pool
+arm9_code=(
+    0xE59F0018 0xE3A0105A 0xE5801000
+    0xE59F2010 0xE2803004 0xE59F400C
+    0xE8820019
+    "$spin_loop"
+    0x02001000 0x040000D4 0x84000001
+)
 
 head -c "$rom_size" /dev/zero > "$tmp"
 
 put 0x000 'DUSTTEST'                    # Game title (12 bytes, NUL-padded)
 put 0x00C 'DUST'                        # Game code
 put 0x010 '00'                          # Maker code
+put 0x01E "$(printf '\\x%02x' "$generator_version")" # ROM version
 put 0x020 "$(le32 $arm9_offset)"        # ARM9 ROM offset
 put 0x024 "$(le32 $arm9_addr)"          # ARM9 entry address
 put 0x028 "$(le32 $arm9_addr)"          # ARM9 load address
-put 0x02C "$(le32 4)"                   # ARM9 size
+put 0x02C "$(le32 $((${#arm9_code[@]} * 4)))" # ARM9 size
 put 0x030 "$(le32 $arm7_offset)"        # ARM7 ROM offset
 put 0x034 "$(le32 $arm7_addr)"          # ARM7 entry address
 put 0x038 "$(le32 $arm7_addr)"          # ARM7 load address
 put 0x03C "$(le32 4)"                   # ARM7 size
 put 0x080 "$(le32 $((arm7_offset + 4)))" # Total used ROM size
 put 0x084 "$(le32 0x4000)"              # Header size
-put "$arm9_offset" "$(le32 $spin_loop)"
+for i in "${!arm9_code[@]}"; do
+    put $((arm9_offset + i * 4)) "$(le32 $((arm9_code[i])))"
+done
 put "$arm7_offset" "$(le32 $spin_loop)"
 
 # Header CRC-16 (MODBUS: reflected 0x8005, init 0xFFFF) over 0x000..0x15D, stored at 0x15E.

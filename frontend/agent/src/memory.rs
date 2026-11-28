@@ -140,7 +140,7 @@ fn write_8(emu: &mut Emu<Interpreter>, cpu: Cpu, addr: u32, value: u8) {
     }
 }
 
-fn read_unchecked(emu: &mut Emu<Interpreter>, cpu: Cpu, addr: u32, len: u32) -> Vec<u8> {
+pub(crate) fn read_unchecked(emu: &mut Emu<Interpreter>, cpu: Cpu, addr: u32, len: u32) -> Vec<u8> {
     (0..len)
         .map(|i| read_8(emu, cpu, addr.wrapping_add(i)))
         .collect()

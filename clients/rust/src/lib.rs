@@ -18,14 +18,18 @@ pub mod pb {
 }
 
 pub use pb::{
-    Button, Control, Cpu, EmuStats, Image, ImageFormat, Instruction, LogEntry, LogLevel, MemRange,
-    MemoryRegion, Regs, SaveFormat, StateBytes, WatchChange,
+    Button, Control, Cpu, EmuStats, HookKind, Image, ImageFormat, Instruction, LogEntry, LogLevel,
+    MemRange, MemoryRegion, Regs, SaveFormat, StateBytes, WatchChange,
 };
 
 use pb::dust_agent_client::DustAgentClient;
 use std::{
-    fmt, io,
+    collections::HashMap,
+    fmt,
+    future::Future,
+    io,
     path::{Path, PathBuf},
+    pin::Pin,
     process::Stdio,
     sync::Arc,
     time::Duration,
@@ -33,8 +37,9 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::{Child, Command},
+    sync::Mutex,
 };
-use tonic::transport::Channel;
+use tonic::{transport::Channel, Streaming};
 
 /// Environment variable naming the `dust-headless` binary used by [`launch`] when
 /// [`LaunchOptions::headless_bin`] is unset.
@@ -208,6 +213,7 @@ impl Client {
             client: self.clone(),
             id: response.session_id,
             _server: None,
+            hooks: Arc::default(),
         })
     }
 }
@@ -255,12 +261,63 @@ pub async fn launch(rom: impl AsRef<Path>, opts: &LaunchOptions) -> Result<Sessi
     Ok(session)
 }
 
+/// A breakpoint or watchpoint hit. The emulator is stopped mid-frame until it is continued.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hit {
+    pub id: u32,
+    pub kind: HookKind,
+    pub cpu: Cpu,
+    /// Executed address for breakpoints, written address for watchpoints.
+    pub addr: u32,
+    /// Written value for watchpoints (as wide as the store); 0 for breakpoints.
+    pub value: u32,
+    /// Frames finished before the hit.
+    pub frame: u64,
+    /// As [`Session::regs`] returns them: r15 reads ahead of the next instruction to execute.
+    pub regs: Regs,
+    /// Results of the reads registered with the hook, in order.
+    pub reads: Vec<Vec<u8>>,
+}
+
+impl From<pb::HookHit> for Hit {
+    fn from(hit: pb::HookHit) -> Self {
+        Hit {
+            kind: hit.kind(),
+            cpu: hit.cpu(),
+            id: hit.id,
+            addr: hit.addr,
+            value: hit.value,
+            frame: hit.frame,
+            regs: hit.regs.unwrap_or_default(),
+            reads: hit.reads,
+        }
+    }
+}
+
+/// A registered breakpoint or watchpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct HookId {
+    pub id: u32,
+    pub kind: HookKind,
+}
+
+type BoxedHandler = Box<dyn FnMut(Session, Hit) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
+
+/// Hit handlers registered with [`Session::on_exec`] and [`Session::on_write`], shared by a
+/// session's clones and run by one dispatcher task.
+#[derive(Default)]
+struct Hooks {
+    handlers: Mutex<HashMap<u32, Arc<Mutex<BoxedHandler>>>>,
+    dispatcher_started: Mutex<bool>,
+}
+
 /// One emulator instance on a server.
 #[derive(Clone)]
 pub struct Session {
     client: Client,
     id: String,
     _server: Option<Arc<ServerProcess>>,
+    hooks: Arc<Hooks>,
 }
 
 impl Session {
@@ -752,14 +809,200 @@ impl Session {
             .entries)
     }
 
-    /// A stream of the session's events (currently new log entries) from now on.
-    pub async fn events(&self) -> Result<tonic::Streaming<pb::Event>> {
+    /// Stops before `cpu` executes the instruction at `addr`. `reads` are read on every hit and
+    /// sent with it. Hits arrive on [`Session::events`] and must be continued with
+    /// [`Session::continue_hit`]; [`Session::on_exec`] does both.
+    pub async fn break_add(&self, cpu: Cpu, addr: u32, reads: &[MemRange]) -> Result<HookId> {
+        let id = self
+            .client
+            .grpc()
+            .break_add(pb::BreakAddRequest {
+                session_id: self.id.clone(),
+                cpu: cpu as i32,
+                addr,
+                reads: reads.to_vec(),
+            })
+            .await?
+            .into_inner()
+            .id;
+        Ok(HookId {
+            id,
+            kind: HookKind::Breakpoint,
+        })
+    }
+
+    /// Stops after `cpu` stores to any of the `size` bytes from `addr`; see
+    /// [`Session::break_add`].
+    pub async fn watch_write_add(
+        &self,
+        cpu: Cpu,
+        addr: u32,
+        size: u32,
+        reads: &[MemRange],
+    ) -> Result<HookId> {
+        let id = self
+            .client
+            .grpc()
+            .watch_write_add(pb::WatchWriteAddRequest {
+                session_id: self.id.clone(),
+                cpu: cpu as i32,
+                addr,
+                size,
+                reads: reads.to_vec(),
+            })
+            .await?
+            .into_inner()
+            .id;
+        Ok(HookId {
+            id,
+            kind: HookKind::WriteWatchpoint,
+        })
+    }
+
+    /// Removes a breakpoint or watchpoint, and its handler if it has one.
+    pub async fn remove_hook(&self, hook: HookId) -> Result<()> {
+        self.hooks.handlers.lock().await.remove(&hook.id);
+        let request = pb::HookRequest {
+            session_id: self.id.clone(),
+            id: hook.id,
+        };
+        match hook.kind {
+            HookKind::Breakpoint => self.client.grpc().break_remove(request).await?,
+            HookKind::WriteWatchpoint => self.client.grpc().watch_write_remove(request).await?,
+        };
+        Ok(())
+    }
+
+    /// Registered breakpoints and watchpoints, oldest first.
+    pub async fn hooks(&self) -> Result<Vec<pb::Hook>> {
+        Ok(self
+            .client
+            .grpc()
+            .break_list(self.request())
+            .await?
+            .into_inner()
+            .hooks)
+    }
+
+    /// The session's event stream: hook hits and log entries from now on, starting with the hit
+    /// the emulator is stopped at, if any.
+    pub async fn events(&self) -> Result<Streaming<pb::Event>> {
         Ok(self
             .client
             .grpc()
             .events(self.request())
             .await?
             .into_inner())
+    }
+
+    /// Lets the emulator go on after a hit; call it once per hit event.
+    pub async fn continue_hit(&self) -> Result<()> {
+        self.client.grpc().r#continue(self.request()).await?;
+        Ok(())
+    }
+
+    /// Calls `handler` whenever `cpu` is about to execute `addr`, then continues. The emulator
+    /// stays stopped while the handler's future runs, so it can read memory and use the session.
+    ///
+    /// ```no_run
+    /// # async fn run(session: dust_client::Session) -> Result<(), dust_client::Error> {
+    /// use dust_client::{Cpu, MemRange};
+    /// let reads = [MemRange { addr: 0x0200_1000, len: 4 }];
+    /// session
+    ///     .on_exec(Cpu::Arm9, 0x0200_0000, &reads, |_emu, hit| async move {
+    ///         println!("r0 = {:#x}, data = {:?}", hit.regs.gprs[0], hit.reads[0]);
+    ///     })
+    ///     .await?;
+    /// session.cycle(60).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn on_exec<F, Fut>(
+        &self,
+        cpu: Cpu,
+        addr: u32,
+        reads: &[MemRange],
+        handler: F,
+    ) -> Result<HookId>
+    where
+        F: FnMut(Session, Hit) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.add_handled(self.break_add(cpu, addr, reads), handler)
+            .await
+    }
+
+    /// Calls `handler` after every store by `cpu` to the `size` bytes from `addr`, then
+    /// continues; see [`Session::on_exec`].
+    pub async fn on_write<F, Fut>(
+        &self,
+        cpu: Cpu,
+        addr: u32,
+        size: u32,
+        reads: &[MemRange],
+        handler: F,
+    ) -> Result<HookId>
+    where
+        F: FnMut(Session, Hit) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.add_handled(self.watch_write_add(cpu, addr, size, reads), handler)
+            .await
+    }
+
+    async fn add_handled<F, Fut>(
+        &self,
+        add: impl Future<Output = Result<HookId>>,
+        mut handler: F,
+    ) -> Result<HookId>
+    where
+        F: FnMut(Session, Hit) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.start_dispatcher().await?;
+        // Holding the lock until the handler is in makes the dispatcher wait for it if the hook
+        // fires right away.
+        let mut handlers = self.hooks.handlers.lock().await;
+        let hook = add.await?;
+        let handler: BoxedHandler = Box::new(move |session, hit| Box::pin(handler(session, hit)));
+        handlers.insert(hook.id, Arc::new(Mutex::new(handler)));
+        Ok(hook)
+    }
+
+    async fn start_dispatcher(&self) -> Result<()> {
+        let mut started = self.hooks.dispatcher_started.lock().await;
+        if *started {
+            return Ok(());
+        }
+        let mut events = self.events().await?;
+        // Handlers get a session that doesn't keep a launched server alive, so dropping the
+        // user's sessions still shuts it down and ends this task.
+        let session = Session {
+            client: self.client.clone(),
+            id: self.id.clone(),
+            _server: None,
+            hooks: Arc::clone(&self.hooks),
+        };
+        tokio::spawn(async move {
+            while let Ok(Some(event)) = events.message().await {
+                let Some(pb::event::Kind::HookHit(hit)) = event.kind else {
+                    continue;
+                };
+                // Hits of hooks without a handler are left to whoever added them.
+                let Some(handler) = session.hooks.handlers.lock().await.get(&hit.id).cloned()
+                else {
+                    continue;
+                };
+                let handled = (handler.lock().await)(session.clone(), hit.into());
+                handled.await;
+                if session.continue_hit().await.is_err() {
+                    break;
+                }
+            }
+            *session.hooks.dispatcher_started.lock().await = false;
+        });
+        *started = true;
+        Ok(())
     }
 
     /// Ends the session on the server.

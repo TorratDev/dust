@@ -814,6 +814,9 @@ pub(super) fn run(
                         gdb_server.emu_shutdown();
                     }
                 }
+                // Without the GDB server no hooks are installed, so these don't happen.
+                #[cfg(all(core_debugger_hooks, not(feature = "gdb-server")))]
+                RunOutput::StoppedByDebugHook | RunOutput::CyclesOver(_) => {}
                 #[cfg(feature = "gdb-server")]
                 RunOutput::StoppedByDebugHook => {}
                 #[cfg(feature = "gdb-server")]

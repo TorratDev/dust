@@ -7,8 +7,8 @@ pub mod pb {
 }
 
 use dust_agent::{
-    Control, ImageFormat, InputStep, Keys, LogEntry, LogLevel, SaveFormat, SessionOptions,
-    LID_CLOSED,
+    Control, Cpu, Hook, HookHit, HookKind, ImageFormat, InputStep, Keys, LogEntry, LogLevel,
+    MemRange, SaveFormat, SessionOptions, LID_CLOSED,
 };
 use pb::dust_agent_server::{DustAgent, DustAgentServer};
 use std::{
@@ -21,9 +21,9 @@ use std::{
         Mutex,
     },
 };
-use tokio::{net::TcpListener, sync::mpsc};
+use tokio::net::TcpListener;
 use tokio_stream::{
-    wrappers::{ReceiverStream, TcpListenerStream},
+    wrappers::{errors::BroadcastStreamRecvError, BroadcastStream, TcpListenerStream},
     Stream, StreamExt,
 };
 use tonic::{Request, Response, Status};
@@ -32,9 +32,6 @@ use worker::{CallError, Worker};
 /// Largest request or reply: save states (main RAM alone is 4 MiB) and big reads don't fit in
 /// gRPC's default 4 MiB.
 pub const MAX_MESSAGE_SIZE: usize = 64 << 20;
-
-/// Events queued per `Events` stream before new ones are dropped.
-const EVENTS_BUFFER: usize = 4096;
 
 #[derive(Default)]
 pub struct AgentService {
@@ -67,18 +64,28 @@ impl AgentService {
         session_id: &str,
         f: impl FnOnce(&mut dust_agent::Session) -> R + Send + 'static,
     ) -> Result<R, Status> {
-        self.worker(session_id)?
-            .call(f)
-            .await
-            .map_err(|CallError::Stopped| Status::aborted("the session's worker thread stopped"))
+        // Don't hold on to the worker while waiting: destroying the session must be able to
+        // drop its last handle and abort a step stopped at a hook hit.
+        let result = self.worker(session_id)?.call(f);
+        result.await.map_err(stopped)
     }
+}
+
+fn stopped(_: CallError) -> Status {
+    Status::aborted("the session's worker thread stopped")
 }
 
 /// Serves the API on `listener` until the process exits.
 pub async fn serve(listener: TcpListener) -> Result<(), tonic::transport::Error> {
     tonic::transport::Server::builder()
         .add_service(AgentService::new().into_server())
-        .serve_with_incoming(TcpListenerStream::new(listener))
+        .serve_with_incoming(TcpListenerStream::new(listener).map(|stream| {
+            // Small request/response exchanges (such as a hook hit and its Continue) otherwise
+            // wait out Nagle's algorithm and delayed ACKs: about 40 ms each.
+            let stream = stream?;
+            stream.set_nodelay(true)?;
+            Ok::<_, std::io::Error>(stream)
+        }))
         .await
 }
 
@@ -103,18 +110,83 @@ fn status_to_pb(status: dust_agent::Status) -> pb::SessionStatus {
 }
 
 fn agent_error(err: dust_agent::Error) -> Status {
+    use dust_agent::Error;
     match err {
-        dust_agent::Error::Shutdown => Status::failed_precondition(err.to_string()),
-        dust_agent::Error::NoSave => Status::failed_precondition(err.to_string()),
+        Error::Shutdown | Error::StoppedAtHook | Error::NotStopped => {
+            Status::failed_precondition(err.to_string())
+        }
+        Error::NoSuchHook(_) => Status::not_found(err.to_string()),
+        Error::Interrupted => Status::aborted(err.to_string()),
+        Error::NoSave => Status::failed_precondition(err.to_string()),
         _ => Status::invalid_argument(err.to_string()),
     }
 }
 
-fn cpu_from_pb(cpu: i32) -> Result<dust_agent::Cpu, Status> {
+fn cpu_from_pb(cpu: i32) -> Result<Cpu, Status> {
     match pb::Cpu::try_from(cpu) {
-        Ok(pb::Cpu::Arm9) => Ok(dust_agent::Cpu::Arm9),
-        Ok(pb::Cpu::Arm7) => Ok(dust_agent::Cpu::Arm7),
+        Ok(pb::Cpu::Arm9) => Ok(Cpu::Arm9),
+        Ok(pb::Cpu::Arm7) => Ok(Cpu::Arm7),
         Err(_) => Err(Status::invalid_argument(format!("unknown cpu {cpu}"))),
+    }
+}
+
+fn cpu_to_pb(cpu: Cpu) -> pb::Cpu {
+    match cpu {
+        Cpu::Arm9 => pb::Cpu::Arm9,
+        Cpu::Arm7 => pb::Cpu::Arm7,
+    }
+}
+
+fn hook_kind_to_pb(kind: HookKind) -> pb::HookKind {
+    match kind {
+        HookKind::Breakpoint => pb::HookKind::Breakpoint,
+        HookKind::WriteWatchpoint => pb::HookKind::WriteWatchpoint,
+    }
+}
+
+fn ranges_from_pb(ranges: Vec<pb::MemRange>) -> Vec<MemRange> {
+    ranges
+        .into_iter()
+        .map(|range| MemRange {
+            addr: range.addr,
+            len: range.len,
+        })
+        .collect()
+}
+
+fn hook_to_pb(hook: &Hook) -> pb::Hook {
+    pb::Hook {
+        id: hook.id,
+        kind: hook_kind_to_pb(hook.kind) as i32,
+        cpu: cpu_to_pb(hook.cpu) as i32,
+        addr: hook.addr,
+        size: hook.size,
+        reads: hook
+            .reads
+            .iter()
+            .map(|range| pb::MemRange {
+                addr: range.addr,
+                len: range.len,
+            })
+            .collect(),
+    }
+}
+
+pub(crate) fn hit_event(hit: &HookHit) -> pb::Event {
+    pb::Event {
+        kind: Some(pb::event::Kind::HookHit(pb::HookHit {
+            id: hit.id,
+            kind: hook_kind_to_pb(hit.kind) as i32,
+            cpu: cpu_to_pb(hit.cpu) as i32,
+            addr: hit.addr,
+            value: hit.value,
+            frame: hit.frame,
+            regs: Some(pb::Regs {
+                gprs: hit.regs.gprs.to_vec(),
+                cpsr: hit.regs.cpsr,
+            }),
+            reads: hit.reads.clone(),
+        })),
     }
 }
 
@@ -202,6 +274,12 @@ fn log_level_from_pb(level: i32) -> Result<LogLevel, Status> {
     }
 }
 
+pub(crate) fn log_event(entry: &LogEntry) -> pb::Event {
+    pb::Event {
+        kind: Some(pb::event::Kind::Log(log_entry_to_pb(entry))),
+    }
+}
+
 fn log_entry_to_pb(entry: &LogEntry) -> pb::LogEntry {
     pb::LogEntry {
         seq: entry.seq,
@@ -219,13 +297,6 @@ fn log_entry_to_pb(entry: &LogEntry) -> pb::LogEntry {
             .iter()
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect(),
-    }
-}
-
-fn cpu_to_pb(cpu: dust_agent::Cpu) -> pb::Cpu {
-    match cpu {
-        dust_agent::Cpu::Arm9 => pb::Cpu::Arm9,
-        dust_agent::Cpu::Arm7 => pb::Cpu::Arm7,
     }
 }
 
@@ -779,33 +850,106 @@ service_impl! {
             }))
         }
 
+        async fn break_add(
+            &self,
+            request: Request<pb::BreakAddRequest>,
+        ) -> Result<Response<pb::HookId>, Status> {
+            let request = request.into_inner();
+            let (cpu, addr, reads) =
+                (cpu_from_pb(request.cpu)?, request.addr, ranges_from_pb(request.reads));
+            let id = self
+                .call(&request.session_id, move |session| {
+                    session.break_add(cpu, addr, reads)
+                })
+                .await?
+                .map_err(agent_error)?;
+            Ok(Response::new(pb::HookId { id }))
+        }
+
+        async fn break_remove(
+            &self,
+            request: Request<pb::HookRequest>,
+        ) -> Result<Response<pb::Empty>, Status> {
+            let request = request.into_inner();
+            let id = request.id;
+            self.call(&request.session_id, move |session| session.break_remove(id))
+                .await?
+                .map_err(agent_error)?;
+            Ok(Response::new(pb::Empty {}))
+        }
+
+        async fn break_list(
+            &self,
+            request: Request<pb::SessionRequest>,
+        ) -> Result<Response<pb::HookList>, Status> {
+            let hooks = self
+                .call(&request.into_inner().session_id, |session| {
+                    session.hooks().iter().map(hook_to_pb).collect()
+                })
+                .await?;
+            Ok(Response::new(pb::HookList { hooks }))
+        }
+
+        async fn watch_write_add(
+            &self,
+            request: Request<pb::WatchWriteAddRequest>,
+        ) -> Result<Response<pb::HookId>, Status> {
+            let request = request.into_inner();
+            let (cpu, addr, size, reads) = (
+                cpu_from_pb(request.cpu)?,
+                request.addr,
+                request.size,
+                ranges_from_pb(request.reads),
+            );
+            let id = self
+                .call(&request.session_id, move |session| {
+                    session.watch_write_add(cpu, addr, size, reads)
+                })
+                .await?
+                .map_err(agent_error)?;
+            Ok(Response::new(pb::HookId { id }))
+        }
+
+        async fn watch_write_remove(
+            &self,
+            request: Request<pb::HookRequest>,
+        ) -> Result<Response<pb::Empty>, Status> {
+            let request = request.into_inner();
+            let id = request.id;
+            self.call(&request.session_id, move |session| session.watch_write_remove(id))
+                .await?
+                .map_err(agent_error)?;
+            Ok(Response::new(pb::Empty {}))
+        }
+
         async fn events(
             &self,
             request: Request<pb::SessionRequest>,
         ) -> Result<Response<Self::EventsStream>, Status> {
-            let (tx, rx) = mpsc::channel(EVENTS_BUFFER);
-            self.call(&request.into_inner().session_id, move |session| {
-                session.subscribe_logs(Box::new(move |entry| {
-                    let event = pb::Event {
-                        kind: Some(pb::event::Kind::Log(log_entry_to_pb(entry))),
-                    };
-                    // A client that doesn't keep up misses entries (Logs still has them); the
-                    // subscription ends with the stream, on the next entry after that.
-                    !matches!(tx.try_send(event), Err(mpsc::error::TrySendError::Closed(_)))
-                }));
+            let subscribed = self.worker(&request.into_inner().session_id)?.subscribe();
+            let (events, current) = subscribed.await.map_err(stopped)?;
+            let live = BroadcastStream::new(events).map(|event| {
+                event.map_err(|BroadcastStreamRecvError::Lagged(missed)| {
+                    Status::data_loss(format!("this stream fell behind and missed {missed} events"))
+                })
+            });
+            let stream = tokio_stream::iter(current.map(Ok)).chain(live);
+            Ok(Response::new(Box::pin(stream) as Self::EventsStream))
+        }
+
+        async fn r#continue(
+            &self,
+            request: Request<pb::SessionRequest>,
+        ) -> Result<Response<pb::Empty>, Status> {
+            self.call(&request.into_inner().session_id, |session| {
+                session.request_continue()
             })
-            .await?;
-            Ok(Response::new(Box::pin(ReceiverStream::new(rx).map(Ok))))
+            .await?
+            .map_err(agent_error)?;
+            Ok(Response::new(pb::Empty {}))
         }
     }
 
-    // Breakpoints and watchpoints
-    break_add(pb::BreakAddRequest) -> pb::HookId;
-    break_remove(pb::HookRequest) -> pb::Empty;
-    break_list(pb::SessionRequest) -> pb::HookList;
-    watch_write_add(pb::WatchWriteAddRequest) -> pb::HookId;
-    watch_write_remove(pb::HookRequest) -> pb::Empty;
-    r#continue(pb::SessionRequest) -> pb::Empty;
 
     // Parallel sessions and RL
     step_batch(pb::StepBatchRequest) -> pb::StepBatchResponse;
