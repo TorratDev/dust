@@ -17,7 +17,7 @@ pub mod pb {
     tonic::include_proto!("dust_agent");
 }
 
-pub use pb::{Control, Cpu, MemRange, Regs, WatchChange};
+pub use pb::{Button, Control, Cpu, MemRange, Regs, WatchChange};
 
 use pb::dust_agent_client::DustAgentClient;
 use std::{
@@ -106,6 +106,15 @@ pub struct SessionOptions {
     pub arm9_bios: Option<PathBuf>,
     /// Fixed RTC time in Unix seconds (UTC), for reproducible runs; `None` uses the host clock.
     pub rtc_unix_time: Option<i64>,
+}
+
+/// One step of [`Session::sequence`]: hold exactly `buttons` (and touch `touch`, in bottom-screen
+/// pixels) for `frames` frames.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InputStep {
+    pub buttons: Vec<Button>,
+    pub touch: Option<(u32, u32)>,
+    pub frames: u32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -457,6 +466,101 @@ impl Session {
             .await?
             .into_inner()
             .into())
+    }
+
+    fn buttons_request(&self, buttons: &[Button]) -> pb::ButtonsRequest {
+        pb::ButtonsRequest {
+            session_id: self.id.clone(),
+            buttons: buttons.iter().map(|&button| button as i32).collect(),
+        }
+    }
+
+    /// Holds `buttons` for `frames` frames, then releases them.
+    pub async fn press(&self, buttons: &[Button], frames: u32) -> Result<Status> {
+        let response = self
+            .client
+            .grpc()
+            .press(pb::PressRequest {
+                session_id: self.id.clone(),
+                buttons: buttons.iter().map(|&button| button as i32).collect(),
+                frames,
+            })
+            .await?
+            .into_inner();
+        Ok(response.status.unwrap_or_default().into())
+    }
+
+    /// Holds `buttons` from the next frame on, until [`Session::release`].
+    pub async fn hold(&self, buttons: &[Button]) -> Result<()> {
+        self.client
+            .grpc()
+            .hold(self.buttons_request(buttons))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn release(&self, buttons: &[Button]) -> Result<()> {
+        self.client
+            .grpc()
+            .release(self.buttons_request(buttons))
+            .await?;
+        Ok(())
+    }
+
+    /// Touches pixel (`x`, `y`) of the 256x192 bottom screen for `frames` frames, then lifts the
+    /// pen. With `frames` = 0 the touch stays until [`Session::touch_end`].
+    pub async fn touch(&self, x: u32, y: u32, frames: u32) -> Result<Status> {
+        let response = self
+            .client
+            .grpc()
+            .touch(pb::TouchRequest {
+                session_id: self.id.clone(),
+                x,
+                y,
+                frames,
+            })
+            .await?
+            .into_inner();
+        Ok(response.status.unwrap_or_default().into())
+    }
+
+    pub async fn touch_end(&self) -> Result<()> {
+        self.client.grpc().touch_end(self.request()).await?;
+        Ok(())
+    }
+
+    /// Runs `steps` in order; afterwards the held buttons and touch are back to what they were.
+    pub async fn sequence(&self, steps: &[InputStep]) -> Result<Status> {
+        let response = self
+            .client
+            .grpc()
+            .sequence(pb::SequenceRequest {
+                session_id: self.id.clone(),
+                steps: steps
+                    .iter()
+                    .map(|step| pb::InputStep {
+                        buttons: step.buttons.iter().map(|&button| button as i32).collect(),
+                        touch: step.touch.map(|(x, y)| pb::TouchPoint { x, y }),
+                        frames: step.frames,
+                    })
+                    .collect(),
+            })
+            .await?
+            .into_inner();
+        Ok(response.status.unwrap_or_default().into())
+    }
+
+    /// Replaces the held buttons with a raw mask in py-desmume's bit order (`1 << (KEY_x - 1)`),
+    /// so existing py-desmume input files work unchanged.
+    pub async fn keypad(&self, mask: u32) -> Result<()> {
+        self.client
+            .grpc()
+            .set_keypad(pb::KeypadRequest {
+                session_id: self.id.clone(),
+                mask,
+            })
+            .await?;
+        Ok(())
     }
 
     /// Ends the session on the server.

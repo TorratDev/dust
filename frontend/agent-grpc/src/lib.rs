@@ -6,7 +6,7 @@ pub mod pb {
     tonic::include_proto!("dust_agent");
 }
 
-use dust_agent::{Control, SessionOptions};
+use dust_agent::{Control, InputStep, Keys, SessionOptions, LID_CLOSED};
 use pb::dust_agent_server::{DustAgent, DustAgentServer};
 use std::{
     collections::HashMap,
@@ -99,6 +99,50 @@ fn cpu_from_pb(cpu: i32) -> Result<dust_agent::Cpu, Status> {
         Ok(pb::Cpu::Arm9) => Ok(dust_agent::Cpu::Arm9),
         Ok(pb::Cpu::Arm7) => Ok(dust_agent::Cpu::Arm7),
         Err(_) => Err(Status::invalid_argument(format!("unknown cpu {cpu}"))),
+    }
+}
+
+fn keys_from_pb(buttons: &[i32]) -> Result<Keys, Status> {
+    buttons.iter().try_fold(Keys::empty(), |keys, &button| {
+        let key = match pb::Button::try_from(button) {
+            Ok(pb::Button::A) => Keys::A,
+            Ok(pb::Button::B) => Keys::B,
+            Ok(pb::Button::Select) => Keys::SELECT,
+            Ok(pb::Button::Start) => Keys::START,
+            Ok(pb::Button::Right) => Keys::RIGHT,
+            Ok(pb::Button::Left) => Keys::LEFT,
+            Ok(pb::Button::Up) => Keys::UP,
+            Ok(pb::Button::Down) => Keys::DOWN,
+            Ok(pb::Button::R) => Keys::R,
+            Ok(pb::Button::L) => Keys::L,
+            Ok(pb::Button::X) => Keys::X,
+            Ok(pb::Button::Y) => Keys::Y,
+            Ok(pb::Button::Debug) => Keys::DEBUG,
+            Ok(pb::Button::LidClosed) => LID_CLOSED,
+            Err(_) => return Err(Status::invalid_argument(format!("unknown button {button}"))),
+        };
+        Ok(keys | key)
+    })
+}
+
+fn touch_coord(value: u32) -> u16 {
+    // Out-of-range values stay out of range and are rejected by the session.
+    value.min(u16::MAX as u32) as u16
+}
+
+fn step_response(result: dust_agent::StepResult) -> pb::StepResponse {
+    pb::StepResponse {
+        status: Some(status_to_pb(result.status)),
+        changes: result
+            .changes
+            .into_iter()
+            .map(|change| pb::WatchChange {
+                watch_id: change.watch_id,
+                addr: change.addr,
+                old_data: change.old_data,
+                new_data: change.new_data,
+            })
+            .collect(),
     }
 }
 
@@ -200,19 +244,7 @@ service_impl! {
                 .call(&request.session_id, move |session| session.step(frames))
                 .await?
                 .map_err(agent_error)?;
-            Ok(Response::new(pb::StepResponse {
-                status: Some(status_to_pb(result.status)),
-                changes: result
-                    .changes
-                    .into_iter()
-                    .map(|change| pb::WatchChange {
-                        watch_id: change.watch_id,
-                        addr: change.addr,
-                        old_data: change.old_data,
-                        new_data: change.new_data,
-                    })
-                    .collect(),
-            }))
+            Ok(Response::new(step_response(result)))
         }
 
         async fn read(
@@ -364,16 +396,98 @@ service_impl! {
                 .map_err(agent_error)?;
             Ok(Response::new(status_to_pb(status)))
         }
-    }
 
-    // Input
-    press(pb::PressRequest) -> pb::StepResponse;
-    hold(pb::ButtonsRequest) -> pb::Empty;
-    release(pb::ButtonsRequest) -> pb::Empty;
-    touch(pb::TouchRequest) -> pb::StepResponse;
-    touch_end(pb::SessionRequest) -> pb::Empty;
-    sequence(pb::SequenceRequest) -> pb::StepResponse;
-    set_keypad(pb::KeypadRequest) -> pb::Empty;
+        async fn press(
+            &self,
+            request: Request<pb::PressRequest>,
+        ) -> Result<Response<pb::StepResponse>, Status> {
+            let request = request.into_inner();
+            let (keys, frames) = (keys_from_pb(&request.buttons)?, request.frames);
+            let status = self
+                .call(&request.session_id, move |session| session.press(keys, frames))
+                .await?
+                .map_err(agent_error)?;
+            Ok(Response::new(step_response(status)))
+        }
+
+        async fn hold(
+            &self,
+            request: Request<pb::ButtonsRequest>,
+        ) -> Result<Response<pb::Empty>, Status> {
+            let request = request.into_inner();
+            let keys = keys_from_pb(&request.buttons)?;
+            self.call(&request.session_id, move |session| session.hold(keys))
+                .await?;
+            Ok(Response::new(pb::Empty {}))
+        }
+
+        async fn release(
+            &self,
+            request: Request<pb::ButtonsRequest>,
+        ) -> Result<Response<pb::Empty>, Status> {
+            let request = request.into_inner();
+            let keys = keys_from_pb(&request.buttons)?;
+            self.call(&request.session_id, move |session| session.release(keys))
+                .await?;
+            Ok(Response::new(pb::Empty {}))
+        }
+
+        async fn touch(
+            &self,
+            request: Request<pb::TouchRequest>,
+        ) -> Result<Response<pb::StepResponse>, Status> {
+            let request = request.into_inner();
+            let (x, y, frames) = (touch_coord(request.x), touch_coord(request.y), request.frames);
+            let status = self
+                .call(&request.session_id, move |session| session.touch(x, y, frames))
+                .await?
+                .map_err(agent_error)?;
+            Ok(Response::new(step_response(status)))
+        }
+
+        async fn touch_end(
+            &self,
+            request: Request<pb::SessionRequest>,
+        ) -> Result<Response<pb::Empty>, Status> {
+            self.call(&request.into_inner().session_id, |session| session.touch_end())
+                .await?;
+            Ok(Response::new(pb::Empty {}))
+        }
+
+        async fn sequence(
+            &self,
+            request: Request<pb::SequenceRequest>,
+        ) -> Result<Response<pb::StepResponse>, Status> {
+            let request = request.into_inner();
+            let steps = request
+                .steps
+                .iter()
+                .map(|step| {
+                    Ok(InputStep {
+                        keys: keys_from_pb(&step.buttons)?,
+                        touch: step.touch.map(|p| [touch_coord(p.x), touch_coord(p.y)]),
+                        frames: step.frames,
+                    })
+                })
+                .collect::<Result<Vec<_>, Status>>()?;
+            let status = self
+                .call(&request.session_id, move |session| session.sequence(&steps))
+                .await?
+                .map_err(agent_error)?;
+            Ok(Response::new(step_response(status)))
+        }
+
+        async fn set_keypad(
+            &self,
+            request: Request<pb::KeypadRequest>,
+        ) -> Result<Response<pb::Empty>, Status> {
+            let request = request.into_inner();
+            let mask = request.mask;
+            self.call(&request.session_id, move |session| session.set_keypad(mask))
+                .await?;
+            Ok(Response::new(pb::Empty {}))
+        }
+    }
 
     // Breakpoints and watchpoints
     break_add(pb::BreakAddRequest) -> pb::HookId;
