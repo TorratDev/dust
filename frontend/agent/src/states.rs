@@ -15,7 +15,7 @@
 //! In-memory states ([`Session::save_state_bytes`]) use the same layout, uncompressed and without the
 //! save, which is returned separately.
 
-use crate::{Error, Session};
+use crate::{session::Source, Error, Session};
 use dust_core::{
     ds_slot::spi::{eeprom_4k::Eeprom4k, eeprom_fram::EepromFram, flash::Flash, Spi},
     gpu::{Framebuffer, SCREEN_HEIGHT, SCREEN_WIDTH},
@@ -343,7 +343,9 @@ impl Session {
         let save = read_save_file(path.as_ref())?;
         // Validate the size before touching the emulator.
         spi_for_save(SaveContents::New(save.len()))?;
-        self.inputs.save = Some(save.clone());
+        if let Source::Owned(inputs) = &mut self.source {
+            inputs.save = Some(save.clone());
+        }
         self.put_save(save)
     }
 }

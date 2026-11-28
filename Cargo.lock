@@ -1067,6 +1067,8 @@ dependencies = [
  "crossbeam-channel",
  "directories",
  "discord-rpc",
+ "dust-agent",
+ "dust-agent-grpc",
  "dust-core",
  "dust-soft-2d",
  "dust-soft-3d",
@@ -1097,6 +1099,7 @@ dependencies = [
  "slog-term",
  "sync_file",
  "tempfile",
+ "tokio",
  "wgpu",
  "winit",
 ]

@@ -1,4 +1,6 @@
 //! tonic server for `proto/dust_agent.proto`: many sessions per process, one worker thread each.
+//! A host process (the desktop GUI) can also expose its own emulator as a session, see
+//! [`Registry::host`].
 
 mod worker;
 
@@ -15,27 +17,62 @@ use std::{
     pin::Pin,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Mutex,
+        Arc, Mutex,
     },
 };
 use tokio::net::TcpListener;
 use tokio_stream::{wrappers::TcpListenerStream, Stream};
 use tonic::{Request, Response, Status};
+pub use worker::HostedJobs;
 use worker::{CallError, Worker};
 
 /// Largest request or reply: save states (main RAM alone is 4 MiB) and big reads don't fit in
 /// gRPC's default 4 MiB.
 pub const MAX_MESSAGE_SIZE: usize = 64 << 20;
 
+type Sessions = Arc<Mutex<HashMap<String, Worker>>>;
+
 #[derive(Default)]
 pub struct AgentService {
-    sessions: Mutex<HashMap<String, Worker>>,
+    sessions: Sessions,
     next_id: AtomicU64,
+}
+
+/// A handle to a service's sessions, usable from outside the server (e.g. by the desktop GUI).
+#[derive(Clone)]
+pub struct Registry {
+    sessions: Sessions,
+}
+
+impl Registry {
+    /// Exposes a session that lives on the caller's thread under `session_id`, replacing any
+    /// session with that id. The caller polls the returned jobs with
+    /// [`HostedJobs::run_pending`]; calls fail with `ABORTED` once it drops them. Hosted sessions
+    /// can't be destroyed over the API.
+    pub fn host(&self, session_id: impl Into<String>) -> HostedJobs {
+        let (worker, jobs) = Worker::hosted();
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(session_id.into(), worker);
+        jobs
+    }
+
+    /// Removes a session; calls with its id then fail with `NOT_FOUND`.
+    pub fn remove(&self, session_id: &str) {
+        self.sessions.lock().unwrap().remove(session_id);
+    }
 }
 
 impl AgentService {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn registry(&self) -> Registry {
+        Registry {
+            sessions: Arc::clone(&self.sessions),
+        }
     }
 
     pub fn into_server(self) -> DustAgentServer<Self> {
@@ -67,8 +104,16 @@ impl AgentService {
 
 /// Serves the API on `listener` until the process exits.
 pub async fn serve(listener: TcpListener) -> Result<(), tonic::transport::Error> {
+    serve_service(listener, AgentService::new()).await
+}
+
+/// Like [`serve`], with a service created beforehand (to keep its [`AgentService::registry`]).
+pub async fn serve_service(
+    listener: TcpListener,
+    service: AgentService,
+) -> Result<(), tonic::transport::Error> {
     tonic::transport::Server::builder()
-        .add_service(AgentService::new().into_server())
+        .add_service(service.into_server())
         .serve_with_incoming(TcpListenerStream::new(listener))
         .await
 }
@@ -251,11 +296,16 @@ service_impl! {
             request: Request<pb::SessionRequest>,
         ) -> Result<Response<pb::Empty>, Status> {
             let session_id = request.into_inner().session_id;
-            self.sessions
-                .lock()
-                .unwrap()
-                .remove(&session_id)
+            let mut sessions = self.sessions.lock().unwrap();
+            let worker = sessions
+                .get(&session_id)
                 .ok_or_else(|| Status::not_found(format!("no session with id {session_id:?}")))?;
+            if worker.is_hosted() {
+                return Err(Status::failed_precondition(format!(
+                    "session {session_id:?} belongs to its host (the GUI) and can't be destroyed"
+                )));
+            }
+            sessions.remove(&session_id);
             Ok(Response::new(pb::Empty {}))
         }
 

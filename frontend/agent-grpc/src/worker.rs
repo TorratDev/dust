@@ -1,4 +1,6 @@
 //! Each session lives on its own thread: `Emu` is not `Send`, and sessions step concurrently.
+//! Hosted sessions live on a thread their host runs (the desktop GUI's emulation thread), which
+//! polls for jobs with [`HostedJobs::run_pending`].
 
 use dust_agent::{Session, SessionOptions};
 use std::{path::PathBuf, sync::mpsc, thread};
@@ -17,6 +19,29 @@ pub enum CallError {
 #[derive(Clone)]
 pub struct Worker {
     jobs: mpsc::Sender<Job>,
+    hosted: bool,
+}
+
+/// The host's end of a hosted session's job channel.
+pub struct HostedJobs {
+    jobs: mpsc::Receiver<Job>,
+}
+
+impl HostedJobs {
+    /// Runs the queued jobs on `session`, stopping early after one requests a reset (see
+    /// [`Session::reset_requested`]) so the host can rebuild the emulator before the next job.
+    /// Returns whether any job ran.
+    pub fn run_pending(&self, session: &mut Session) -> bool {
+        let mut ran = false;
+        while !session.reset_requested() {
+            let Ok(job) = self.jobs.try_recv() else {
+                break;
+            };
+            job(session);
+            ran = true;
+        }
+        ran
+    }
 }
 
 impl Worker {
@@ -47,10 +72,29 @@ impl Worker {
             })
             .expect("couldn't spawn session thread");
         match ready_rx.await {
-            Ok(Ok(())) => Ok(Worker { jobs: jobs_tx }),
+            Ok(Ok(())) => Ok(Worker {
+                jobs: jobs_tx,
+                hosted: false,
+            }),
             Ok(Err(err)) => Err(err),
             Err(_) => panic!("session thread exited during creation"),
         }
+    }
+
+    /// A worker for a session that lives on its host's thread; the host runs the jobs.
+    pub fn hosted() -> (Self, HostedJobs) {
+        let (jobs_tx, jobs_rx) = mpsc::channel::<Job>();
+        (
+            Worker {
+                jobs: jobs_tx,
+                hosted: true,
+            },
+            HostedJobs { jobs: jobs_rx },
+        )
+    }
+
+    pub fn is_hosted(&self) -> bool {
+        self.hosted
     }
 
     /// Runs `f` on the session's thread and returns its result.

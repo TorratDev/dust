@@ -1,7 +1,7 @@
 //! Agent input: held buttons and touch live in the [`Session`] and are applied as a full set
 //! before every emulated frame, bypassing the keyboard and the keymap.
 
-use crate::{Error, Session, StepResult};
+use crate::{Control, Error, Session, StepResult};
 pub use dust_core::emu::input::Keys;
 
 /// The lid switch (EXTKEYIN bit 7, bit 23 of the combined status). Unlike buttons, its bit is set
@@ -135,20 +135,39 @@ impl Session {
         })
     }
 
-    /// Makes the emulated input match the agent's: presses held buttons, releases the rest.
+    /// Sets the human input of a hosted session (such as the desktop GUI's keyboard), merged with
+    /// the agent's according to [`Session::control`]: the buttons held (the lid is agent-only) and
+    /// the touch position in touchscreen units (16 per pixel), as `Emu::set_touch_pos` takes it.
+    pub fn set_human_input(&mut self, keys: Keys, touch: Option<[u16; 2]>) {
+        self.human_keys = keys & Keys::all();
+        self.human_touch = touch;
+    }
+
+    /// Makes the emulated input match the agent's and/or the human's (see [`Control`]): presses
+    /// held buttons, releases the rest.
     pub(crate) fn apply_input(&mut self) {
+        // The touchscreen controller reports 12-bit positions: 16 units per pixel.
+        let agent_touch = self.touch.map(|[x, y]| [x * 16, y * 16]);
+        let (keys, touch) = match self.control {
+            Control::Agent => (self.keys, agent_touch),
+            Control::Human => (self.human_keys, self.human_touch),
+            Control::Shared => (
+                self.keys | self.human_keys,
+                agent_touch.or(self.human_touch),
+            ),
+        };
         // Press before releasing, so no key IRQ sees a transient all-released state.
-        self.emu.press_keys(self.keys & Keys::all());
-        self.emu.release_keys(Keys::all() - self.keys);
-        // The lid bit is set when closed, so "releasing" it closes the lid.
-        if self.keys.contains(LID_CLOSED) {
+        self.emu.press_keys(keys & Keys::all());
+        self.emu.release_keys(Keys::all() - keys);
+        // The lid bit is set when closed, so "releasing" it closes the lid. Only the agent can
+        // close it; in human control it stays open.
+        if keys.contains(LID_CLOSED) {
             self.emu.release_keys(LID_CLOSED);
         } else {
             self.emu.press_keys(LID_CLOSED);
         }
-        match self.touch {
-            // The touchscreen controller reports 12-bit positions: 16 units per pixel.
-            Some([x, y]) => self.emu.set_touch_pos([x * 16, y * 16]),
+        match touch {
+            Some(pos) => self.emu.set_touch_pos(pos),
             None => self.emu.end_touch(),
         }
     }

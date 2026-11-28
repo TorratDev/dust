@@ -224,6 +224,71 @@ pub struct UiState {
 
     #[cfg(feature = "discord-presence")]
     discord_presence: Option<DiscordPresence>,
+
+    #[cfg(feature = "agent-server")]
+    agent: Option<AgentState>,
+    /// Agents take screenshots from the soft 2D renderer's framebuffer.
+    force_soft_renderer: bool,
+}
+
+#[cfg(feature = "agent-server")]
+struct AgentState {
+    server: emu::agent_host::Server,
+    control: emu::agent_host::Control,
+}
+
+/// Command-line arguments: `[--agent-port N] [--agent-control agent|human|shared] [ROM]`.
+struct Args {
+    rom_path: Option<std::ffi::OsString>,
+    #[cfg(feature = "agent-server")]
+    agent_port: Option<u16>,
+    #[cfg(feature = "agent-server")]
+    agent_control: emu::agent_host::Control,
+}
+
+impl Args {
+    fn parse() -> Self {
+        let mut args = Args {
+            rom_path: None,
+            #[cfg(feature = "agent-server")]
+            agent_port: None,
+            #[cfg(feature = "agent-server")]
+            agent_control: emu::agent_host::Control::Shared,
+        };
+        let mut iter = env::args_os().skip(1);
+        while let Some(arg) = iter.next() {
+            #[cfg(feature = "agent-server")]
+            {
+                let (name, inline_value) = match arg.to_str().and_then(|arg| arg.split_once('=')) {
+                    Some((name, value)) => (name.to_owned(), Some(value.into())),
+                    None => (arg.to_string_lossy().into_owned(), None),
+                };
+                if matches!(name.as_str(), "--agent-port" | "--agent-control") {
+                    let value = inline_value.or_else(|| iter.next()).unwrap_or_default();
+                    let value = value.to_string_lossy();
+                    if name == "--agent-port" {
+                        match value.parse() {
+                            Ok(port) => args.agent_port = Some(port),
+                            Err(_) => eprintln!("Ignoring invalid --agent-port value {value:?}"),
+                        }
+                    } else {
+                        match emu::agent_host::parse_control(&value) {
+                            Some(control) => args.agent_control = control,
+                            None => eprintln!(
+                                "Ignoring invalid --agent-control value {value:?} (expected \
+                                 agent, human or shared)"
+                            ),
+                        }
+                    }
+                    continue;
+                }
+            }
+            if args.rom_path.is_none() {
+                args.rom_path = Some(arg);
+            }
+        }
+        args
+    }
 }
 
 static ALLOWED_ROM_EXTENSIONS: &[&str] = &["nds", "bin"];
@@ -349,6 +414,7 @@ impl UiState {
         window: &window::Window,
         config: &config::Config,
         fb_texture: &mut FbTexture,
+        force_soft: bool,
     ) -> (
         bool,
         Box<dyn engine_2d::Renderer + Send>,
@@ -357,7 +423,13 @@ impl UiState {
         Renderer3dData,
     ) {
         let mut renderer_2d_kind = config!(config, renderer_2d_kind);
-        let renderer_3d_kind = config!(config, renderer_3d_kind);
+        let mut renderer_3d_kind = config!(config, renderer_3d_kind);
+        if force_soft {
+            renderer_3d_kind = Renderer3dKind::Soft;
+            if renderer_2d_kind == Renderer2dKind::WgpuLockstepScanlines {
+                renderer_2d_kind = Renderer2dKind::SoftSync;
+            }
+        }
         if renderer_3d_kind == Renderer3dKind::Wgpu {
             renderer_2d_kind = Renderer2dKind::WgpuLockstepScanlines;
         }
@@ -588,7 +660,12 @@ impl UiState {
         });
 
         let (renderer_2d_is_accel, renderer_2d, renderer_3d_tx, renderer_2d_data, renderer_3d_data) =
-            Self::create_renderers(window, &config.config, &mut self.fb_texture);
+            Self::create_renderers(
+                window,
+                &config.config,
+                &mut self.fb_texture,
+                self.force_soft_renderer,
+            );
 
         let launch_data = emu::LaunchData {
             sys_files: launch_config.sys_files,
@@ -634,6 +711,12 @@ impl UiState {
             renderer_2d,
             renderer_3d_tx,
 
+            #[cfg(feature = "agent-server")]
+            agent: self
+                .agent
+                .as_ref()
+                .map(|agent| agent.server.link(agent.control, title.clone())),
+
             #[cfg(feature = "logging")]
             logger,
         };
@@ -674,6 +757,11 @@ impl UiState {
 
             emu.send_message(emu::Message::Stop);
             self.frame_tx = Some(emu.thread.join().expect("couldn't join emulation thread"));
+
+            #[cfg(feature = "agent-server")]
+            if let Some(agent) = &self.agent {
+                agent.server.unlink();
+            }
 
             if let Some(path) = config.game_path.take() {
                 let game_config = config::File {
@@ -861,6 +949,30 @@ pub fn main() {
 
     let mut config = Config::new();
 
+    let args = Args::parse();
+
+    #[cfg(feature = "agent-server")]
+    let agent = args.agent_port.and_then(|port| {
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        match emu::agent_host::Server::start(addr) {
+            Ok(server) => {
+                // Like dust-headless, so scripts can find the port when it's 0.
+                println!("dust agent server listening on {}", server.addr());
+                Some(AgentState {
+                    server,
+                    control: args.agent_control,
+                })
+            }
+            Err(err) => {
+                error!(
+                    "Agent server not started",
+                    "Couldn't start the agent server on {addr}: {err}"
+                );
+                None
+            }
+        }
+    });
+
     #[cfg(feature = "logging")]
     let log = Log::new(&config.config);
 
@@ -934,6 +1046,13 @@ pub fn main() {
                 } else {
                     None
                 },
+
+                #[cfg(feature = "agent-server")]
+                force_soft_renderer: agent.is_some(),
+                #[cfg(not(feature = "agent-server"))]
+                force_soft_renderer: false,
+                #[cfg(feature = "agent-server")]
+                agent,
             };
 
             #[cfg(feature = "discord-presence")]
@@ -941,7 +1060,7 @@ pub fn main() {
                 discord_presence.stop();
             }
 
-            if let Some(rom_path) = env::args_os().nth(1) {
+            if let Some(rom_path) = &args.rom_path {
                 state.load_from_rom_path(Path::new(&rom_path), &mut config, window);
             }
 
@@ -1137,6 +1256,7 @@ pub fn main() {
                             window,
                             &config.config,
                             &mut state.fb_texture,
+                            state.force_soft_renderer,
                         );
 
                         emu.renderer_2d = renderer_2d_data;
@@ -1451,8 +1571,11 @@ pub fn main() {
                     let imgui_log_enabled = state.log.is_imgui();
                     #[cfg(not(feature = "logging"))]
                     let imgui_log_enabled = false;
-                    if cfg!(any(feature = "debug-views", feature = "gdb-server"))
-                        || imgui_log_enabled
+                    if cfg!(any(
+                        feature = "debug-views",
+                        feature = "gdb-server",
+                        feature = "agent-server"
+                    )) || imgui_log_enabled
                     {
                         #[allow(unused_assignments)]
                         ui.menu("Debug", || {
@@ -1506,6 +1629,33 @@ pub fn main() {
                                 }
                             }}
 
+                            #[cfg(feature = "agent-server")]
+                            if let Some(agent) = &mut state.agent {
+                                section! {{
+                                    use emu::agent_host::Control;
+                                    ui.menu("Agent control", || {
+                                        for (control, label) in [
+                                            (Control::Shared, "Shared (agent and keyboard)"),
+                                            (Control::Agent, "Agent only"),
+                                            (Control::Human, "Keyboard only"),
+                                        ] {
+                                            if ui
+                                                .menu_item_config(label)
+                                                .selected(agent.control == control)
+                                                .build()
+                                            {
+                                                agent.control = control;
+                                                if let Some(emu) = &state.emu {
+                                                    emu.send_message(
+                                                        emu::Message::UpdateAgentControl(control),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    });
+                                }}
+                            }
+
                             #[cfg(feature = "debug-views")]
                             section! {{
                                 state.debug_views.draw_menu(ui, window, state.emu.as_ref().map(|emu| &emu.to_emu));
@@ -1531,6 +1681,18 @@ pub fn main() {
                                 ui.set_cursor_pos(orig_cursor_pos);
                             }
                         }
+                    }
+
+                    #[cfg(feature = "agent-server")]
+                    if let Some(agent) = &state.agent {
+                        let orig_cursor_pos = ui.cursor_pos();
+                        let text = format!("Agent: {}", agent.server.addr());
+                        let width = ui.calc_text_size(&text)[0] + style!(ui, item_spacing)[0];
+                        right_title_limit = right_title_limit.min(ui.content_region_max()[0]) - width;
+                        ui.set_cursor_pos([right_title_limit, ui.cursor_pos()[1]]);
+                        ui.separator();
+                        ui.text(&text);
+                        ui.set_cursor_pos(orig_cursor_pos);
                     }
 
                     state.title_menu_bar.draw_imgui_title(

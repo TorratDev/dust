@@ -15,6 +15,7 @@ debug-views = [
     "dust-core/channel-audio-capture",
 ]
 gdb-server = ["gdb-protocol", "dust-core/debugger-hooks"]
+agent-server = ["dust-agent", "dust-agent-grpc", "tokio"]
 dldi = ["fatfs", "tempfile"]
 
 discord-presence = ["discord-rpc"]
@@ -85,6 +86,11 @@ slog-imgui = { git = "https://github.com/kelpsyberry/slog-imgui", features = ["a
 imgui-memory-editor = { git = "https://github.com/kelpsyberry/imgui-memory-editor", optional = true }
 realfft = { version = "3.0", optional = true }
 gdb-protocol = { version = "0.1", optional = true }
+
+# Agent server
+dust-agent = { path = "../agent", optional = true }
+dust-agent-grpc = { path = "../agent-grpc", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26"

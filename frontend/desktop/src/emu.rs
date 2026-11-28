@@ -1,3 +1,4 @@
+pub mod agent_host;
 #[cfg(feature = "dldi")]
 mod dldi;
 pub mod ds_slot_rom;
@@ -9,6 +10,7 @@ pub mod soft_renderer_3d;
 #[cfg(feature = "debug-views")]
 use super::debug_views;
 use crate::{audio, config::SysFiles, game_db::SaveType, input, FrameData};
+use agent_host::Host;
 use ds_slot_rom::DsSlotRom;
 #[cfg(feature = "xq-audio")]
 use dust_core::audio::{Audio, ChannelInterpMethod as AudioChannelInterpMethod};
@@ -106,6 +108,9 @@ pub enum Message {
 
     #[cfg(feature = "gdb-server")]
     ToggleGdbServer(Option<SocketAddr>),
+
+    #[cfg(feature = "agent-server")]
+    UpdateAgentControl(agent_host::Control),
 }
 
 pub enum Notification {
@@ -366,6 +371,10 @@ pub struct LaunchData {
     pub renderer_2d: Box<dyn engine_2d::Renderer + Send>,
     pub renderer_3d_tx: Box<dyn engine_3d::RendererTx + Send>,
 
+    /// Exposes the emulator to the GUI's agent server, when it's on.
+    #[cfg(feature = "agent-server")]
+    pub agent: Option<agent_host::Link>,
+
     #[cfg(feature = "logging")]
     pub logger: slog::Logger,
 }
@@ -407,6 +416,9 @@ pub(super) fn run(
         mut renderer_2d_is_accel,
         renderer_2d,
         renderer_3d_tx,
+
+        #[cfg(feature = "agent-server")]
+        agent,
 
         #[cfg(feature = "logging")]
         logger,
@@ -476,9 +488,14 @@ pub(super) fn run(
         emu_builder.audio_channel_interp_method = audio_channel_interp_method;
     }
 
-    let Some(mut emu) = build_emu(emu_builder, Interpreter) else {
+    let Some(emu) = build_emu(emu_builder, Interpreter) else {
         return frame_tx;
     };
+    let mut emu = Host::new(
+        emu,
+        #[cfg(feature = "agent-server")]
+        agent,
+    );
 
     const FRAME_BASE_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 60);
     let mut frame_interval = framerate_ratio_limit.map(|value| FRAME_BASE_INTERVAL.div_f32(value));
@@ -521,20 +538,12 @@ pub(super) fn run(
         for message in from_ui.try_iter() {
             match message {
                 Message::UpdateInput(changes) => {
-                    emu.press_keys(changes.pressed);
-                    emu.release_keys(changes.released);
-                    if let Some(new_touch_pos) = changes.touch_pos {
-                        if let Some(touch_pos) = new_touch_pos {
-                            emu.set_touch_pos(touch_pos);
-                        } else {
-                            emu.end_touch();
-                        }
-                    }
+                    emu.update_input(changes);
                 }
 
                 #[cfg(feature = "debug-views")]
                 Message::DebugViews(message) => {
-                    debug_views.handle_message(&mut emu, message, &to_ui);
+                    debug_views.handle_message(&mut *emu, message, &to_ui);
                 }
 
                 Message::Reset => {
@@ -548,7 +557,7 @@ pub(super) fn run(
                 Message::CreateSavestate { name, include_save } => {
                     let mut contents = Vec::new();
                     if PersistentWriteSavestate::new(&mut contents)
-                        .store(&mut emu)
+                        .store(&mut *emu)
                         .is_ok()
                     {
                         notif!(Notification::SavestateCreated(
@@ -585,7 +594,7 @@ pub(super) fn run(
 
                 Message::ApplySavestate(savestate) => {
                     if PersistentReadSavestate::new(&savestate.contents)
-                        .and_then(|mut savestate| savestate.load_into(&mut emu).map_err(drop))
+                        .and_then(|mut savestate| savestate.load_into(&mut *emu).map_err(drop))
                         .is_ok()
                     {
                         if let Some(save) = savestate.save {
@@ -657,6 +666,7 @@ pub(super) fn run(
                     renderer_3d_tx,
                 } => {
                     renderer_2d_is_accel = new_renderer_2d_is_accel;
+                    let emu = &mut *emu;
                     emu.gpu.engine_3d.set_renderer_tx(renderer_3d_tx);
                     emu.gpu.set_renderer_2d(renderer_2d, &mut emu.arm9);
                 }
@@ -683,7 +693,7 @@ pub(super) fn run(
 
                 #[cfg(feature = "xq-audio")]
                 Message::UpdateAudioCustomSampleRate(value) => {
-                    Audio::set_custom_sample_rate(&mut emu, value);
+                    Audio::set_custom_sample_rate(&mut *emu, value);
                 }
 
                 #[cfg(feature = "xq-audio")]
@@ -699,6 +709,11 @@ pub(super) fn run(
                 #[cfg(feature = "logging")]
                 Message::UpdateLogger(_logger) => {
                     // TODO
+                }
+
+                #[cfg(feature = "agent-server")]
+                Message::UpdateAgentControl(control) => {
+                    emu.set_control(control);
                 }
 
                 #[cfg(feature = "gdb-server")]
@@ -723,7 +738,7 @@ pub(super) fn run(
                                 }
                             }
                         } else {
-                            gdb_server.take().unwrap().detach(&mut emu);
+                            gdb_server.take().unwrap().detach(&mut *emu);
                         }
                         shared_state
                             .gdb_server_active
@@ -737,47 +752,55 @@ pub(super) fn run(
 
         #[cfg(feature = "gdb-server")]
         if let Some(gdb_server) = &mut gdb_server {
-            reset_triggered |= gdb_server.poll(&mut emu) == gdb_server::EmuControlFlow::Reset;
+            reset_triggered |= gdb_server.poll(&mut *emu) == gdb_server::EmuControlFlow::Reset;
             playing &= gdb_server.is_running();
         }
 
+        // Agent calls run here, between frames; one that resets stops the polling until the
+        // emulator is rebuilt below.
+        reset_triggered |= emu.poll_agent();
+        playing &= !emu.agent_paused();
+
         if reset_triggered {
-            #[cfg(feature = "xq-audio")]
-            let audio_custom_sample_rate = emu.audio.custom_sample_rate();
-            #[cfg(feature = "xq-audio")]
-            let audio_channel_interp_method = emu.audio.channel_interp_method();
+            let rebuilt = emu.rebuild(|emu| {
+                #[cfg(feature = "xq-audio")]
+                let audio_custom_sample_rate = emu.audio.custom_sample_rate();
+                #[cfg(feature = "xq-audio")]
+                let audio_channel_interp_method = emu.audio.channel_interp_method();
 
-            let (renderer_2d, renderer_3d_tx) = emu.gpu.into_renderers();
+                let (renderer_2d, renderer_3d_tx) = emu.gpu.into_renderers();
 
-            let mut emu_builder = emu::Builder::new(
-                emu.spi.firmware.reset(),
-                emu.ds_slot.rom.into_contents(),
-                emu.ds_slot.spi.reset(),
-                emu.audio.backend,
-                emu.spi.tsc.mic_data.map(|mic_data| mic_data.backend),
-                emu.rtc.backend,
-                renderer_2d,
-                renderer_3d_tx,
-                emu.dldi.map(|dldi| dldi.into_provider()),
-                #[cfg(feature = "log")]
-                logger.clone(),
-            );
+                let mut emu_builder = emu::Builder::new(
+                    emu.spi.firmware.reset(),
+                    emu.ds_slot.rom.into_contents(),
+                    emu.ds_slot.spi.reset(),
+                    emu.audio.backend,
+                    emu.spi.tsc.mic_data.map(|mic_data| mic_data.backend),
+                    emu.rtc.backend,
+                    renderer_2d,
+                    renderer_3d_tx,
+                    emu.dldi.map(|dldi| dldi.into_provider()),
+                    #[cfg(feature = "log")]
+                    logger.clone(),
+                );
 
-            emu_builder.arm7_bios.clone_from(&sys_files.arm7_bios);
-            emu_builder.arm9_bios.clone_from(&sys_files.arm9_bios);
+                emu_builder.arm7_bios.clone_from(&sys_files.arm7_bios);
+                emu_builder.arm9_bios.clone_from(&sys_files.arm9_bios);
 
-            emu_builder.model = model;
-            emu_builder.direct_boot = skip_firmware;
-            // TODO: Set batch_duration and first_launch?
-            emu_builder.audio_sample_chunk_size = emu.audio.sample_chunk_size;
-            #[cfg(feature = "xq-audio")]
-            {
-                emu_builder.audio_custom_sample_rate = audio_custom_sample_rate;
-                emu_builder.audio_channel_interp_method = audio_channel_interp_method;
-            }
+                emu_builder.model = model;
+                emu_builder.direct_boot = skip_firmware;
+                // TODO: Set batch_duration and first_launch?
+                emu_builder.audio_sample_chunk_size = emu.audio.sample_chunk_size;
+                #[cfg(feature = "xq-audio")]
+                {
+                    emu_builder.audio_custom_sample_rate = audio_custom_sample_rate;
+                    emu_builder.audio_channel_interp_method = audio_channel_interp_method;
+                }
 
-            if let Some(new_emu) = build_emu(emu_builder, Interpreter) {
-                emu = new_emu;
+                build_emu(emu_builder, Interpreter)
+            });
+            if let Some(rebuilt) = rebuilt {
+                emu = rebuilt;
             } else {
                 return frame_tx;
             };
@@ -789,16 +812,16 @@ pub(super) fn run(
 
         if playing {
             #[cfg(not(feature = "gdb-server"))]
-            let run_output = emu.run();
+            let run_output = emu.run_frame(|emu| emu.run());
             #[cfg(feature = "gdb-server")]
-            let run_output = {
+            let run_output = emu.run_frame(|emu| {
                 let mut run_forever = [0; 2];
                 emu.run_with_cycles(if let Some(gdb_server) = &mut gdb_server {
                     &mut gdb_server.remaining_step_cycles
                 } else {
                     &mut run_forever
                 })
-            };
+            });
             match run_output {
                 RunOutput::FrameFinished => {}
                 RunOutput::Shutdown => {
@@ -814,7 +837,7 @@ pub(super) fn run(
                 #[cfg(feature = "gdb-server")]
                 RunOutput::CyclesOver(core_mask) => {
                     if let Some(gdb_server) = &mut gdb_server {
-                        gdb_server.cycles_over(&mut emu, core_mask);
+                        gdb_server.cycles_over(&mut *emu, core_mask);
                     }
                 }
             }
@@ -827,7 +850,7 @@ pub(super) fn run(
         }
 
         #[cfg(feature = "debug-views")]
-        debug_views.update(&mut emu, &mut frame.debug, &to_ui);
+        debug_views.update(&mut *emu, &mut frame.debug, &to_ui);
 
         frames_since_last_fps_calc += 1;
         let now = Instant::now();

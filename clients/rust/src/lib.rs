@@ -39,6 +39,9 @@ use tonic::transport::Channel;
 /// [`LaunchOptions::headless_bin`] is unset.
 pub const HEADLESS_BIN_ENV: &str = "DUST_HEADLESS";
 
+/// Id of the desktop GUI's own session when it runs with `--agent-port` (see [`Client::session`]).
+pub const GUI_SESSION_ID: &str = "gui";
+
 const LISTENING_PREFIX: &str = "dust-headless listening on ";
 /// Largest request or reply (save states and big reads exceed gRPC's default 4 MiB); the
 /// server uses the same limit.
@@ -183,6 +186,16 @@ impl Client {
     /// The generated gRPC client, for RPCs this crate doesn't wrap yet.
     pub fn grpc(&self) -> DustAgentClient<Channel> {
         self.grpc.clone()
+    }
+
+    /// A handle to an existing session, such as the desktop GUI's [`GUI_SESSION_ID`]. Nothing is
+    /// checked until the first call.
+    pub fn session(&self, id: impl Into<String>) -> Session {
+        Session {
+            client: self.clone(),
+            id: id.into(),
+            _server: None,
+        }
     }
 
     /// Starts a new emulator session on the server with `rom`.
