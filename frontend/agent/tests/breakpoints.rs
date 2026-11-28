@@ -281,3 +281,47 @@ fn write_watchpoint_fires_on_dma() {
         (id, DMA_DST, STORE_VALUE)
     );
 }
+
+/// Hooks aren't part of save states and keep working after loading one.
+#[test]
+fn hooks_survive_state_load() {
+    let mut session = session();
+    let state = session.save_state_bytes(false).unwrap();
+    session
+        .watch_write_add(Cpu::Arm9, STORE_ADDR, 4, Vec::new())
+        .unwrap();
+    session
+        .break_add(Cpu::Arm9, ARM9_STORE, Vec::new())
+        .unwrap();
+    let hits = record(&mut session);
+    session.step(1).unwrap();
+    session.load_state_bytes(&state.state, None).unwrap();
+    session.step(1).unwrap();
+    let kinds: Vec<_> = hits.borrow().iter().map(|hit| hit.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            HookKind::Breakpoint,
+            HookKind::WriteWatchpoint,
+            HookKind::Breakpoint,
+            HookKind::WriteWatchpoint
+        ]
+    );
+}
+
+#[test]
+fn no_state_load_while_stopped() {
+    let mut session = session();
+    let state = session.save_state_bytes(false).unwrap();
+    session
+        .break_add(Cpu::Arm9, ARM9_ENTRY, Vec::new())
+        .unwrap();
+    session.set_hit_handler(Some(Box::new(move |session, _hit| {
+        assert!(matches!(
+            session.load_state_bytes(&state.state, None),
+            Err(Error::StoppedAtHook)
+        ));
+        ControlFlow::Continue(())
+    })));
+    session.step(1).unwrap();
+}

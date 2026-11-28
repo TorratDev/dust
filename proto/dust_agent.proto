@@ -57,12 +57,20 @@ service DustAgent {
   rpc Continue(SessionRequest) returns (Empty);
 
   // --- Screen, save states and save files -------------------------------------------------------
+  // The last finished frame; right after a state load, the frame stored in the state.
   rpc Screenshot(ScreenshotRequest) returns (Image);
+  // State files use the desktop GUI's savestate layout, so both can load each other's states.
   rpc SaveState(StatePathRequest) returns (Empty);
+  // Restores the frame counter too (states from the GUI keep the current one). On error the
+  // session is unchanged.
   rpc LoadState(StatePathRequest) returns (SessionStatus);
+  // In-memory states, for fast resets.
   rpc SaveStateBytes(SaveStateBytesRequest) returns (StateBytes);
   rpc LoadStateBytes(LoadStateBytesRequest) returns (SessionStatus);
+  // Writes the cartridge save; FAILED_PRECONDITION if the session has none.
   rpc ExportSave(SaveFileRequest) returns (Empty);
+  // Replaces the cartridge save (a DeSmuME footer is stripped whatever the format); the save type
+  // follows the file size, and the save is kept across Reset. Games usually read it after a reset.
   rpc ImportSave(SaveFileRequest) returns (Empty);
 
   // --- Observability ----------------------------------------------------------------------------
@@ -133,6 +141,9 @@ message CreateSessionRequest {
   string arm9_bios_path = 4;
   // Fixed RTC time in Unix seconds (UTC); the host clock is used when unset.
   optional int64 rtc_unix_time = 5;
+  // Optional cartridge save (raw .sav or DeSmuME .dsv); its size sets the save type. Without one
+  // the cartridge has no save memory until ImportSave.
+  string save_path = 6;
 }
 
 message CreateSessionResponse {
@@ -371,7 +382,7 @@ message ScreenshotRequest {
 }
 
 message Image {
-  // Both screens, top above bottom: 256x384.
+  // Both screens, top above bottom: 256x384. Raw RGB is 3 bytes per pixel, row by row.
   uint32 width = 1;
   uint32 height = 2;
   ImageFormat format = 3;
@@ -381,7 +392,7 @@ message Image {
 message StatePathRequest {
   string session_id = 1;
   string path = 2;
-  // SaveState only: also store the cartridge save.
+  // SaveState only: also store the cartridge save (LoadState restores it when present).
   bool include_save = 3;
 }
 
@@ -398,6 +409,7 @@ message StateBytes {
 message LoadStateBytesRequest {
   string session_id = 1;
   bytes state = 2;
+  // Replaces the cartridge save when set.
   optional bytes save = 3;
 }
 

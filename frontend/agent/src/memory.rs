@@ -19,7 +19,7 @@ pub enum Cpu {
     Arm7,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Regs {
     /// r0-r15, as the CPU holds them: r15 reads ahead of the executing instruction (+8 in ARM
     /// state, +4 in Thumb state).
