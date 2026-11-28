@@ -71,7 +71,7 @@ async fn planned_rpcs_are_unimplemented() {
     let err = session
         .client()
         .grpc()
-        .break_list(pb::SessionRequest {
+        .memory_map(pb::SessionRequest {
             session_id: session.id().to_owned(),
         })
         .await

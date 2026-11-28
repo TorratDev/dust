@@ -721,6 +721,14 @@ impl<E: cpu::Engine> Emu<E> {
 
     #[inline(never)]
     pub fn run(&mut self) -> RunOutput {
+        // With debugger hooks the frame end is latched in `frame_finished` (see `run!`); clear it
+        // and any previous debug stop, or every later call would return after a single batch.
+        #[cfg(feature = "debugger-hooks")]
+        {
+            self.frame_finished = false;
+            self.arm7.was_stopped_by_debug_hook = false;
+            self.arm9.was_stopped_by_debug_hook = false;
+        }
         self.spi.tsc.start_frame(self.schedule.cur_time());
         loop {
             run!(self, E);

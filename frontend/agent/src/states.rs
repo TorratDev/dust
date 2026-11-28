@@ -275,6 +275,7 @@ impl Session {
             ));
         }
 
+        self.state_replaced();
         if let Some(frame) = state.frame {
             self.frame = frame;
         }

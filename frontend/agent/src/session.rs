@@ -1,4 +1,5 @@
 use crate::{
+    breakpoints::{Hook, HookHit, HookKind, Hooks, MemRange},
     memory::{self, Cpu, Regs, WatchChange, Watches},
     rtc, soft_renderer_3d, states, Keys,
 };
@@ -11,6 +12,7 @@ use dust_core::{
     flash::Flash,
     gpu::{engine_2d, engine_3d, Framebuffer},
     spi::firmware,
+    utils::schedule::RawTimestamp,
     utils::{zeroed_box, BoxedByteSlice, Bytes},
     Model, SaveContents,
 };
@@ -59,7 +61,17 @@ pub struct StepResult {
     pub status: Status,
     /// Watched ranges that changed since the previous step (writes made in between included).
     pub changes: Vec<WatchChange>,
+    /// Breakpoint and watchpoint hits, in order (each was also passed to the hit handler).
+    pub hits: Vec<HookHit>,
 }
+
+/// Called by [`Session::step`] for every hook hit while the emulator is stopped on it; emulation
+/// resumes when it returns. It can read and write memory and registers, add or remove hooks, and
+/// reset or load a state (which ends the step), but not step.
+pub type HitHandler = Box<dyn FnMut(&mut Session, &HookHit)>;
+
+/// Cycles passed to `run_with_cycles`: never reached, so it only stops at frame ends and hooks.
+const RUN_FOREVER: RawTimestamp = 1 << 62;
 
 #[derive(Debug)]
 pub enum Error {
@@ -78,7 +90,7 @@ pub enum Error {
     },
     /// The emulated system powered off; reset the session to continue.
     Shutdown,
-    /// A bad memory/register request (size, register index, watch id).
+    /// A bad memory/register/hook request (size, register index, watch or hook id).
     InvalidArgument(String),
     /// A save state that can't be loaded.
     InvalidState(String),
@@ -86,6 +98,8 @@ pub enum Error {
     InvalidSave(String),
     /// The cartridge has no save memory to export.
     NoSave,
+    /// Stepping from inside the hit handler.
+    InHitHandler,
 }
 
 impl fmt::Display for Error {
@@ -106,6 +120,9 @@ impl fmt::Display for Error {
             Error::NoSave => f.write_str(
                 "the session has no cartridge save (create it with a save file or import one)",
             ),
+            Error::InHitHandler => {
+                f.write_str("can't step while stopped at a hook hit (continue first)")
+            }
         }
     }
 }
@@ -282,6 +299,12 @@ pub struct Session {
     paused: bool,
     control: Control,
     watches: Watches,
+    hooks: Hooks,
+    hit_handler: Option<HitHandler>,
+    in_hit_handler: bool,
+    /// Bumped whenever the emulator state is replaced (reset, state load), so a step interrupted
+    /// by a hit handler that did so ends there.
+    pub(crate) generation: u64,
     /// Agent input, applied before every frame (see `input.rs`).
     pub(crate) keys: Keys,
     pub(crate) touch: Option<[u16; 2]>,
@@ -292,7 +315,9 @@ pub struct Session {
 impl Session {
     pub fn new(rom: impl Into<PathBuf>, opts: &SessionOptions) -> Result<Self, Error> {
         let inputs = Inputs::load(&rom.into(), opts)?;
-        let emu = inputs.build_emu()?;
+        let mut emu = inputs.build_emu()?;
+        let hooks = Hooks::new();
+        hooks.install(&mut emu);
         Ok(Session {
             game_title: inputs.game_title(),
             inputs,
@@ -301,6 +326,10 @@ impl Session {
             paused: false,
             control: Control::default(),
             watches: Watches::default(),
+            hooks,
+            hit_handler: None,
+            in_hit_handler: false,
+            generation: 0,
             keys: Keys::empty(),
             touch: None,
             screen_override: None,
@@ -309,21 +338,110 @@ impl Session {
 
     /// Emulates `frames` whole frames. Stepping works while paused: pausing only stops
     /// free-running hosts (such as the desktop GUI) from advancing on their own.
+    ///
+    /// Breakpoint and watchpoint hits stop emulation mid-frame and call the hit handler; the step
+    /// ends early if the handler resets the session or loads a state.
     pub fn step(&mut self, frames: u32) -> Result<StepResult, Error> {
-        for _ in 0..frames {
+        if self.in_hit_handler {
+            return Err(Error::InHitHandler);
+        }
+        let generation = self.generation;
+        let mut hits = Vec::new();
+        'frames: for _ in 0..frames {
             self.apply_input();
-            match self.emu.run() {
-                RunOutput::FrameFinished => {
-                    self.frame += 1;
-                    self.screen_override = None;
+            loop {
+                // Nothing stays stopped between runs: hits are handled before resuming.
+                self.emu.arm7.is_stopped = false;
+                self.emu.arm9.is_stopped = false;
+                // `run_with_cycles` (unlike `run`) resumes mid-frame without restarting the frame.
+                match self.emu.run_with_cycles(&mut [RUN_FOREVER; 2]) {
+                    RunOutput::FrameFinished => {
+                        self.frame += 1;
+                        self.screen_override = None;
+                        break;
+                    }
+                    RunOutput::Shutdown => return Err(Error::Shutdown),
+                    RunOutput::StoppedByDebugHook => {
+                        for hit in self.hooks.take_hits(&mut self.emu, self.frame) {
+                            self.call_hit_handler(&hit);
+                            hits.push(hit);
+                            if self.generation != generation {
+                                break 'frames;
+                            }
+                        }
+                    }
+                    RunOutput::CyclesOver(_) => {}
                 }
-                RunOutput::Shutdown => return Err(Error::Shutdown),
             }
         }
         Ok(StepResult {
             status: self.status(),
             changes: self.watches.changes(&mut self.emu),
+            hits,
         })
+    }
+
+    fn call_hit_handler(&mut self, hit: &HookHit) {
+        let Some(mut handler) = self.hit_handler.take() else {
+            return;
+        };
+        self.in_hit_handler = true;
+        handler(self, hit);
+        self.in_hit_handler = false;
+        // The handler may have installed a new one.
+        if self.hit_handler.is_none() {
+            self.hit_handler = Some(handler);
+        }
+    }
+
+    /// Sets the function called on every breakpoint/watchpoint hit (see [`HitHandler`]); without
+    /// one, hits are only returned by [`Session::step`].
+    pub fn set_hit_handler(&mut self, handler: Option<HitHandler>) {
+        self.hit_handler = handler;
+    }
+
+    /// Whether the emulator is stopped at a hook hit (only true inside the hit handler).
+    pub fn in_hit_handler(&self) -> bool {
+        self.in_hit_handler
+    }
+
+    /// Stops before `cpu` executes the instruction at `addr` (bit 0, the Thumb bit, is ignored).
+    /// `reads` are read on every hit and returned in [`HookHit::reads`].
+    pub fn break_add(&mut self, cpu: Cpu, addr: u32, reads: Vec<MemRange>) -> Result<u32, Error> {
+        self.hooks.add_breakpoint(&mut self.emu, cpu, addr, reads)
+    }
+
+    pub fn break_remove(&mut self, id: u32) -> Result<(), Error> {
+        self.hooks.remove(&mut self.emu, id, HookKind::Breakpoint)
+    }
+
+    /// Stops after any `cpu` store that writes one of the `size` bytes at `addr` (DMA and agent
+    /// writes don't trigger it).
+    pub fn watch_write_add(
+        &mut self,
+        cpu: Cpu,
+        addr: u32,
+        size: u32,
+        reads: Vec<MemRange>,
+    ) -> Result<u32, Error> {
+        self.hooks
+            .add_write_watchpoint(&mut self.emu, cpu, addr, size, reads)
+    }
+
+    pub fn watch_write_remove(&mut self, id: u32) -> Result<(), Error> {
+        self.hooks
+            .remove(&mut self.emu, id, HookKind::WriteWatchpoint)
+    }
+
+    /// Breakpoints and write watchpoints, in the order they were added.
+    pub fn hooks(&self) -> &[Hook] {
+        self.hooks.list()
+    }
+
+    /// Called after the emulator state was replaced in place (state load).
+    pub(crate) fn state_replaced(&mut self) {
+        self.generation += 1;
+        self.hooks.install(&mut self.emu);
     }
 
     pub fn pause(&mut self) {
@@ -338,6 +456,8 @@ impl Session {
     /// counter restarts at 0 and agent input is released.
     pub fn reset(&mut self) -> Result<(), Error> {
         self.emu = self.inputs.build_emu()?;
+        self.hooks.install(&mut self.emu);
+        self.generation += 1;
         self.frame = 0;
         self.keys = Keys::empty();
         self.touch = None;

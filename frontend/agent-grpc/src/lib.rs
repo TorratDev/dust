@@ -6,7 +6,10 @@ pub mod pb {
     tonic::include_proto!("dust_agent");
 }
 
-use dust_agent::{Control, ImageFormat, InputStep, Keys, SaveFormat, SessionOptions, LID_CLOSED};
+use dust_agent::{
+    Control, HookKind, ImageFormat, InputStep, Keys, MemRange, SaveFormat, SessionOptions,
+    LID_CLOSED,
+};
 use pb::dust_agent_server::{DustAgent, DustAgentServer};
 use std::{
     collections::HashMap,
@@ -19,7 +22,10 @@ use std::{
     },
 };
 use tokio::net::TcpListener;
-use tokio_stream::{wrappers::TcpListenerStream, Stream};
+use tokio_stream::{
+    wrappers::{BroadcastStream, TcpListenerStream},
+    Stream, StreamExt,
+};
 use tonic::{Request, Response, Status};
 use worker::{CallError, Worker};
 
@@ -69,7 +75,12 @@ impl AgentService {
 pub async fn serve(listener: TcpListener) -> Result<(), tonic::transport::Error> {
     tonic::transport::Server::builder()
         .add_service(AgentService::new().into_server())
-        .serve_with_incoming(TcpListenerStream::new(listener))
+        // Without TCP_NODELAY, small replies (e.g. per-hit events) wait ~40 ms for delayed ACKs.
+        .serve_with_incoming(TcpListenerStream::new(listener).map(|stream| {
+            let stream = stream?;
+            stream.set_nodelay(true)?;
+            Ok::<_, std::io::Error>(stream)
+        }))
         .await
 }
 
@@ -97,6 +108,7 @@ fn agent_error(err: dust_agent::Error) -> Status {
     match err {
         dust_agent::Error::Shutdown => Status::failed_precondition(err.to_string()),
         dust_agent::Error::NoSave => Status::failed_precondition(err.to_string()),
+        dust_agent::Error::InHitHandler => Status::failed_precondition(err.to_string()),
         _ => Status::invalid_argument(err.to_string()),
     }
 }
@@ -106,6 +118,51 @@ fn cpu_from_pb(cpu: i32) -> Result<dust_agent::Cpu, Status> {
         Ok(pb::Cpu::Arm9) => Ok(dust_agent::Cpu::Arm9),
         Ok(pb::Cpu::Arm7) => Ok(dust_agent::Cpu::Arm7),
         Err(_) => Err(Status::invalid_argument(format!("unknown cpu {cpu}"))),
+    }
+}
+
+fn cpu_to_pb(cpu: dust_agent::Cpu) -> i32 {
+    match cpu {
+        dust_agent::Cpu::Arm9 => pb::Cpu::Arm9 as i32,
+        dust_agent::Cpu::Arm7 => pb::Cpu::Arm7 as i32,
+    }
+}
+
+fn hook_kind_to_pb(kind: HookKind) -> i32 {
+    match kind {
+        HookKind::Breakpoint => pb::HookKind::Breakpoint as i32,
+        HookKind::WriteWatchpoint => pb::HookKind::WriteWatchpoint as i32,
+    }
+}
+
+fn ranges_from_pb(ranges: &[pb::MemRange]) -> Vec<MemRange> {
+    ranges
+        .iter()
+        .map(|range| MemRange {
+            addr: range.addr,
+            len: range.len,
+        })
+        .collect()
+}
+
+fn regs_to_pb(regs: dust_agent::Regs) -> pb::Regs {
+    pb::Regs {
+        gprs: regs.gprs.to_vec(),
+        cpsr: regs.cpsr,
+    }
+}
+
+pub(crate) fn hit_to_pb(hit: &dust_agent::HookHit) -> pb::HookHit {
+    pb::HookHit {
+        id: hit.id,
+        kind: hook_kind_to_pb(hit.kind),
+        cpu: cpu_to_pb(hit.cpu),
+        addr: hit.addr,
+        value: hit.value,
+        frame: hit.frame,
+        regs: Some(regs_to_pb(hit.regs)),
+        reads: hit.reads.clone(),
+        size: hit.size,
     }
 }
 
@@ -177,6 +234,7 @@ fn step_response(result: dust_agent::StepResult) -> pb::StepResponse {
                 new_data: change.new_data,
             })
             .collect(),
+        hits: result.hits.iter().map(hit_to_pb).collect(),
     }
 }
 
@@ -251,11 +309,14 @@ service_impl! {
             request: Request<pb::SessionRequest>,
         ) -> Result<Response<pb::Empty>, Status> {
             let session_id = request.into_inner().session_id;
-            self.sessions
+            let worker = self
+                .sessions
                 .lock()
                 .unwrap()
                 .remove(&session_id)
                 .ok_or_else(|| Status::not_found(format!("no session with id {session_id:?}")))?;
+            // A step stopped at a hit would otherwise keep the session alive.
+            worker.release_hit();
             Ok(Response::new(pb::Empty {}))
         }
 
@@ -345,10 +406,7 @@ service_impl! {
             let regs = self
                 .call(&request.session_id, move |session| session.regs(cpu))
                 .await?;
-            Ok(Response::new(pb::Regs {
-                gprs: regs.gprs.to_vec(),
-                cpsr: regs.cpsr,
-            }))
+            Ok(Response::new(regs_to_pb(regs)))
         }
 
         async fn set_reg(
@@ -632,16 +690,124 @@ service_impl! {
                 .await?;
             Ok(Response::new(pb::Empty {}))
         }
-    }
 
-    // Breakpoints and watchpoints
-    break_add(pb::BreakAddRequest) -> pb::HookId;
-    break_remove(pb::HookRequest) -> pb::Empty;
-    break_list(pb::SessionRequest) -> pb::HookList;
-    watch_write_add(pb::WatchWriteAddRequest) -> pb::HookId;
-    watch_write_remove(pb::HookRequest) -> pb::Empty;
-    events(pb::SessionRequest) -> Self::EventsStream;
-    r#continue(pb::SessionRequest) -> pb::Empty;
+        async fn break_add(
+            &self,
+            request: Request<pb::BreakAddRequest>,
+        ) -> Result<Response<pb::HookId>, Status> {
+            let request = request.into_inner();
+            let cpu = cpu_from_pb(request.cpu)?;
+            let reads = ranges_from_pb(&request.reads);
+            let id = self
+                .call(&request.session_id, move |session| {
+                    session.break_add(cpu, request.addr, reads)
+                })
+                .await?
+                .map_err(agent_error)?;
+            Ok(Response::new(pb::HookId { id }))
+        }
+
+        async fn break_remove(
+            &self,
+            request: Request<pb::HookRequest>,
+        ) -> Result<Response<pb::Empty>, Status> {
+            let request = request.into_inner();
+            let id = request.id;
+            self.call(&request.session_id, move |session| session.break_remove(id))
+                .await?
+                .map_err(agent_error)?;
+            Ok(Response::new(pb::Empty {}))
+        }
+
+        async fn break_list(
+            &self,
+            request: Request<pb::SessionRequest>,
+        ) -> Result<Response<pb::HookList>, Status> {
+            let hooks = self
+                .call(&request.into_inner().session_id, |session| {
+                    session.hooks().to_vec()
+                })
+                .await?;
+            Ok(Response::new(pb::HookList {
+                hooks: hooks
+                    .into_iter()
+                    .map(|hook| pb::Hook {
+                        id: hook.id,
+                        kind: hook_kind_to_pb(hook.kind),
+                        cpu: cpu_to_pb(hook.cpu),
+                        addr: hook.addr,
+                        size: hook.size,
+                        reads: hook
+                            .reads
+                            .iter()
+                            .map(|range| pb::MemRange {
+                                addr: range.addr,
+                                len: range.len,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            }))
+        }
+
+        async fn watch_write_add(
+            &self,
+            request: Request<pb::WatchWriteAddRequest>,
+        ) -> Result<Response<pb::HookId>, Status> {
+            let request = request.into_inner();
+            let cpu = cpu_from_pb(request.cpu)?;
+            let reads = ranges_from_pb(&request.reads);
+            let id = self
+                .call(&request.session_id, move |session| {
+                    session.watch_write_add(cpu, request.addr, request.size, reads)
+                })
+                .await?
+                .map_err(agent_error)?;
+            Ok(Response::new(pb::HookId { id }))
+        }
+
+        async fn watch_write_remove(
+            &self,
+            request: Request<pb::HookRequest>,
+        ) -> Result<Response<pb::Empty>, Status> {
+            let request = request.into_inner();
+            let id = request.id;
+            self.call(&request.session_id, move |session| {
+                session.watch_write_remove(id)
+            })
+            .await?
+            .map_err(agent_error)?;
+            Ok(Response::new(pb::Empty {}))
+        }
+
+        async fn events(
+            &self,
+            request: Request<pb::SessionRequest>,
+        ) -> Result<Response<Self::EventsStream>, Status> {
+            let events = self.worker(&request.into_inner().session_id)?.subscribe();
+            // A lagging subscriber skips events rather than failing (hits wait for Continue, so
+            // only bursts of other events can lag).
+            let stream = BroadcastStream::new(events).filter_map(|event| event.ok().map(Ok));
+            Ok(Response::new(Box::pin(stream)))
+        }
+
+        async fn r#continue(
+            &self,
+            request: Request<pb::SessionRequest>,
+        ) -> Result<Response<pb::Empty>, Status> {
+            let resumed = self
+                .worker(&request.into_inner().session_id)?
+                .continue_after_hit()
+                .await
+                .map_err(|CallError::Stopped| {
+                    Status::aborted("the session's worker thread stopped")
+                })?;
+            if !resumed {
+                return Err(Status::failed_precondition("not stopped at a hook hit"));
+            }
+            Ok(Response::new(pb::Empty {}))
+        }
+    }
 
     // Observability
     memory_map(pb::SessionRequest) -> pb::MemoryMapResponse;

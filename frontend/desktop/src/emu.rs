@@ -817,6 +817,11 @@ pub(super) fn run(
                         gdb_server.cycles_over(&mut emu, core_mask);
                     }
                 }
+                // dust-core's `debugger-hooks` can be on without `gdb-server` when the workspace
+                // is built together with dust-agent; no hooks are set then.
+                #[cfg(not(feature = "gdb-server"))]
+                #[allow(unreachable_patterns)]
+                _ => {}
             }
         }
 

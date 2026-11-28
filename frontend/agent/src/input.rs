@@ -99,6 +99,7 @@ impl Session {
             return Ok(StepResult {
                 status: self.status(),
                 changes: Vec::new(),
+                hits: Vec::new(),
             });
         }
         let result = self.step(frames);
@@ -107,7 +108,7 @@ impl Session {
     }
 
     /// Runs `steps` in order; afterwards the held buttons and touch are back to what they were.
-    /// The watch changes of every step are returned together.
+    /// The watch changes and hook hits of every step are returned together.
     pub fn sequence(&mut self, steps: &[InputStep]) -> Result<StepResult, Error> {
         for step in steps {
             if let Some([x, y]) = step.touch {
@@ -115,13 +116,16 @@ impl Session {
             }
         }
         let (prev_keys, prev_touch) = (self.keys, self.touch);
-        let mut changes = Vec::new();
+        let (mut changes, mut hits) = (Vec::new(), Vec::new());
         let mut result = Ok(());
         for step in steps {
             self.keys = step.keys;
             self.touch = step.touch;
             match self.step(step.frames) {
-                Ok(step_result) => changes.extend(step_result.changes),
+                Ok(step_result) => {
+                    changes.extend(step_result.changes);
+                    hits.extend(step_result.hits);
+                }
                 Err(err) => {
                     result = Err(err);
                     break;
@@ -132,6 +136,7 @@ impl Session {
         result.map(|()| StepResult {
             status: self.status(),
             changes,
+            hits,
         })
     }
 

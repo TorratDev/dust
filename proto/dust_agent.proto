@@ -46,14 +46,21 @@ service DustAgent {
   rpc Unwatch(UnwatchRequest) returns (Empty);
 
   // --- Breakpoints and watchpoints --------------------------------------------------------------
+  // A breakpoint stops before the instruction at its address runs; a write watchpoint stops right
+  // after a CPU store to one of its bytes (DMA and Write RPCs don't trigger it). Addresses are
+  // matched as the CPU issues them, so main RAM mirrors are separate addresses.
   rpc BreakAdd(BreakAddRequest) returns (HookId);
   rpc BreakRemove(HookRequest) returns (Empty);
   rpc BreakList(SessionRequest) returns (HookList);
   rpc WatchWriteAdd(WatchWriteAddRequest) returns (HookId);
   rpc WatchWriteRemove(HookRequest) returns (Empty);
-  // Breakpoint/watchpoint hits, logs and control changes. After a hit the emulator waits for
-  // Continue.
+  // Breakpoint/watchpoint hits, logs and control changes. While a client is subscribed, a hit
+  // stops the running step mid-frame, is sent here, and the emulator waits for Continue; other
+  // RPCs (reads, writes, registers, hooks) are served meanwhile, and Step returns once the frames
+  // are done. Without a subscriber, hits are only returned in StepResponse.hits. Use one
+  // subscriber per session: every Continue resumes the current hit.
   rpc Events(SessionRequest) returns (stream Event);
+  // Resumes after a hit; FAILED_PRECONDITION when not stopped at one.
   rpc Continue(SessionRequest) returns (Empty);
 
   // --- Screen, save states and save files -------------------------------------------------------
@@ -166,6 +173,8 @@ message WatchChange {
 message StepResponse {
   SessionStatus status = 1;
   repeated WatchChange changes = 2;
+  // Breakpoint/watchpoint hits during the step, in order (also sent on Events).
+  repeated HookHit hits = 3;
 }
 
 // --- Input --------------------------------------------------------------------------------------
@@ -307,6 +316,7 @@ message UnwatchRequest {
 message BreakAddRequest {
   string session_id = 1;
   Cpu cpu = 2;
+  // Instruction address; bit 0 (the Thumb bit) is ignored.
   uint32 addr = 3;
   // Read on every hit and sent with the event.
   repeated MemRange reads = 4;
@@ -316,6 +326,7 @@ message WatchWriteAddRequest {
   string session_id = 1;
   Cpu cpu = 2;
   uint32 addr = 3;
+  // Watched bytes from addr on.
   uint32 size = 4;
   repeated MemRange reads = 5;
 }
@@ -351,14 +362,19 @@ message HookHit {
   uint32 id = 1;
   HookKind kind = 2;
   Cpu cpu = 3;
-  // Executed address for breakpoints, written address for watchpoints.
+  // Executed address for breakpoints, written address (aligned to the access size) for
+  // watchpoints.
   uint32 addr = 4;
-  // Written value for watchpoints.
+  // Written value for watchpoints (read back right after the store).
   uint32 value = 5;
+  // The frame being emulated (frames finished so far).
   uint64 frame = 6;
+  // r15 reads ahead: +8 (ARM) or +4 (Thumb) from the breakpoint's instruction.
   Regs regs = 7;
   // Results of the hook's registered reads, in order.
   repeated bytes reads = 8;
+  // Access size in bytes for watchpoints (1, 2 or 4).
+  uint32 size = 9;
 }
 
 message Event {

@@ -15,7 +15,7 @@ description = "Client for dust's gRPC control API (dust-headless)"
 tonic = "0.14"
 tonic-prost = "0.14"
 prost = "0.14"
-tokio = { version = "1", features = ["process", "io-util", "time", "rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["process", "io-util", "time", "rt-multi-thread", "macros", "sync"] }
 
 [build-dependencies]
 tonic-prost-build = "0.14"
