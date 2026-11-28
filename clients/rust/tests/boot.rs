@@ -5,7 +5,7 @@
 //! or pointed to with `DUST_HEADLESS`. The test ROM is generated with `tools/fetch_test_rom.sh`
 //! if missing; `DUST_TEST_ROM` selects another ROM.
 
-use dust_client::{pb, Control, LaunchOptions, Session};
+use dust_client::{pb, Button, Control, InputStep, LaunchOptions, Session};
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -148,6 +148,46 @@ async fn missing_rom_is_invalid_argument() {
         Err(dust_client::Error::Rpc(status)) => status,
         Err(err) => panic!("unexpected error: {err}"),
         Ok(_) => panic!("created a session without a ROM"),
+    };
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn input_rpcs() {
+    let session = launch().await;
+    assert_eq!(
+        session
+            .press(&[Button::A, Button::Start], 2)
+            .await
+            .unwrap()
+            .frame,
+        2
+    );
+    session.hold(&[Button::B]).await.unwrap();
+    session.release(&[Button::B]).await.unwrap();
+    session.keypad(1 << 10).await.unwrap();
+    assert_eq!(session.touch(128, 96, 3).await.unwrap().frame, 5);
+    session.touch_end().await.unwrap();
+    let status = session
+        .sequence(&[
+            InputStep {
+                buttons: vec![Button::Up],
+                touch: None,
+                frames: 1,
+            },
+            InputStep {
+                buttons: vec![],
+                touch: Some((0, 191)),
+                frames: 2,
+            },
+        ])
+        .await
+        .unwrap();
+    assert_eq!(status.frame, 8);
+
+    let err = match session.touch(256, 0, 1).await {
+        Err(dust_client::Error::Rpc(status)) => status,
+        other => panic!("unexpected result: {:?}", other.map(|_| ())),
     };
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
 }
