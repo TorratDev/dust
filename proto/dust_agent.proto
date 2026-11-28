@@ -25,8 +25,12 @@ service DustAgent {
   rpc Press(PressRequest) returns (StepResponse);
   rpc Hold(ButtonsRequest) returns (Empty);
   rpc Release(ButtonsRequest) returns (Empty);
+  // Touches (x, y) of the 256x192 bottom screen for `frames` frames, then lifts the pen; with
+  // frames = 0 the pen stays down until TouchEnd.
   rpc Touch(TouchRequest) returns (StepResponse);
   rpc TouchEnd(SessionRequest) returns (Empty);
+  // Runs the steps in order, each holding exactly its buttons; afterwards the held buttons and
+  // touch are back to what they were.
   rpc Sequence(SequenceRequest) returns (StepResponse);
   // Sets the held buttons from a raw mask in py-desmume's bit order.
   rpc SetKeypad(KeypadRequest) returns (Empty);

@@ -1,4 +1,4 @@
-use crate::{rtc, soft_renderer_3d};
+use crate::{rtc, soft_renderer_3d, Keys};
 use chrono::{DateTime, NaiveDateTime};
 use dust_core::{
     audio::DummyBackend as DummyAudioBackend,
@@ -57,6 +57,11 @@ pub enum Error {
     InvalidBios(String),
     InvalidRtcTime(i64),
     InvalidRom(String),
+    /// A touch position outside the 256x192 bottom screen.
+    InvalidTouch {
+        x: u16,
+        y: u16,
+    },
     /// The emulated system powered off; reset the session to continue.
     Shutdown,
 }
@@ -69,6 +74,9 @@ impl fmt::Display for Error {
             Error::InvalidBios(msg) => write!(f, "invalid BIOS: {msg}"),
             Error::InvalidRtcTime(time) => write!(f, "invalid RTC time: {time}"),
             Error::InvalidRom(msg) => write!(f, "invalid ROM: {msg}"),
+            Error::InvalidTouch { x, y } => {
+                write!(f, "touch position ({x}, {y}) is outside the 256x192 screen")
+            }
             Error::Shutdown => f.write_str("the emulated system shut down"),
         }
     }
@@ -228,11 +236,14 @@ impl Inputs {
 /// One emulator instance, advanced only by [`Session::step`].
 pub struct Session {
     inputs: Inputs,
-    emu: emu::Emu<Interpreter>,
+    pub(crate) emu: emu::Emu<Interpreter>,
     game_title: String,
     frame: u64,
     paused: bool,
     control: Control,
+    /// Agent input, applied before every frame (see `input.rs`).
+    pub(crate) keys: Keys,
+    pub(crate) touch: Option<[u16; 2]>,
 }
 
 impl Session {
@@ -246,6 +257,8 @@ impl Session {
             frame: 0,
             paused: false,
             control: Control::default(),
+            keys: Keys::empty(),
+            touch: None,
         })
     }
 
@@ -253,6 +266,7 @@ impl Session {
     /// free-running hosts (such as the desktop GUI) from advancing on their own.
     pub fn step(&mut self, frames: u32) -> Result<Status, Error> {
         for _ in 0..frames {
+            self.apply_input();
             match self.emu.run() {
                 RunOutput::FrameFinished => self.frame += 1,
                 RunOutput::Shutdown => return Err(Error::Shutdown),
@@ -269,10 +283,13 @@ impl Session {
         self.paused = false;
     }
 
-    /// Rebuilds the emulator from the same ROM and options; the frame counter restarts at 0.
+    /// Rebuilds the emulator from the same ROM and options; the frame counter restarts at 0 and
+    /// agent input is released.
     pub fn reset(&mut self) -> Result<(), Error> {
         self.emu = self.inputs.build_emu()?;
         self.frame = 0;
+        self.keys = Keys::empty();
+        self.touch = None;
         Ok(())
     }
 

@@ -4,8 +4,10 @@
 //! and advances it only when asked to. `Session` is not `Send`; servers create and use each one on
 //! its own thread (see `dust-agent-grpc`).
 
+mod input;
 mod rtc;
 mod session;
 mod soft_renderer_3d;
 
+pub use input::{keys_from_desmume_mask, InputStep, Keys, LID_CLOSED, TOUCH_HEIGHT, TOUCH_WIDTH};
 pub use session::{Control, Error, Session, SessionOptions, Status};
