@@ -5,9 +5,11 @@
 //! its own thread (see `dust-agent-grpc`).
 
 mod input;
+pub mod memory;
 mod rtc;
 mod session;
 mod soft_renderer_3d;
 
 pub use input::{keys_from_desmume_mask, InputStep, Keys, LID_CLOSED, TOUCH_HEIGHT, TOUCH_WIDTH};
-pub use session::{Control, Error, Session, SessionOptions, Status};
+pub use memory::{Cpu, Regs, WatchChange};
+pub use session::{Control, Error, Session, SessionOptions, Status, StepResult};
