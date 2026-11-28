@@ -113,6 +113,6 @@ fn sequence_restores_held_input() {
             },
         ])
         .unwrap();
-    assert_eq!(status.frame, 5);
+    assert_eq!(status.status.frame, 5);
     assert_eq!(session.held(), Keys::B);
 }

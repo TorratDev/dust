@@ -6,7 +6,7 @@ pub mod pb {
     tonic::include_proto!("dust_agent");
 }
 
-use dust_agent::{Control, InputStep, Keys, SessionOptions, LID_CLOSED};
+use dust_agent::{Control, ImageFormat, InputStep, Keys, SaveFormat, SessionOptions, LID_CLOSED};
 use pb::dust_agent_server::{DustAgent, DustAgentServer};
 use std::{
     collections::HashMap,
@@ -23,6 +23,10 @@ use tokio_stream::{wrappers::TcpListenerStream, Stream};
 use tonic::{Request, Response, Status};
 use worker::{CallError, Worker};
 
+/// Largest request or reply: save states (main RAM alone is 4 MiB) and big reads don't fit in
+/// gRPC's default 4 MiB.
+pub const MAX_MESSAGE_SIZE: usize = 64 << 20;
+
 #[derive(Default)]
 pub struct AgentService {
     sessions: Mutex<HashMap<String, Worker>>,
@@ -36,6 +40,8 @@ impl AgentService {
 
     pub fn into_server(self) -> DustAgentServer<Self> {
         DustAgentServer::new(self)
+            .max_decoding_message_size(MAX_MESSAGE_SIZE)
+            .max_encoding_message_size(MAX_MESSAGE_SIZE)
     }
 
     fn worker(&self, session_id: &str) -> Result<Worker, Status> {
@@ -90,6 +96,7 @@ fn status_to_pb(status: dust_agent::Status) -> pb::SessionStatus {
 fn agent_error(err: dust_agent::Error) -> Status {
     match err {
         dust_agent::Error::Shutdown => Status::failed_precondition(err.to_string()),
+        dust_agent::Error::NoSave => Status::failed_precondition(err.to_string()),
         _ => Status::invalid_argument(err.to_string()),
     }
 }
@@ -123,6 +130,33 @@ fn keys_from_pb(buttons: &[i32]) -> Result<Keys, Status> {
         };
         Ok(keys | key)
     })
+}
+
+fn image_format_from_pb(format: i32) -> Result<ImageFormat, Status> {
+    match pb::ImageFormat::try_from(format) {
+        Ok(pb::ImageFormat::RawRgb) => Ok(ImageFormat::RawRgb),
+        Ok(pb::ImageFormat::Png) => Ok(ImageFormat::Png),
+        Err(_) => Err(Status::invalid_argument(format!(
+            "unknown image format {format}"
+        ))),
+    }
+}
+
+fn save_format_from_pb(format: i32) -> Result<SaveFormat, Status> {
+    match pb::SaveFormat::try_from(format) {
+        Ok(pb::SaveFormat::Raw) => Ok(SaveFormat::Raw),
+        Ok(pb::SaveFormat::Dsv) => Ok(SaveFormat::Dsv),
+        Err(_) => Err(Status::invalid_argument(format!(
+            "unknown save format {format}"
+        ))),
+    }
+}
+
+fn required_path(path: String) -> Result<PathBuf, Status> {
+    if path.is_empty() {
+        return Err(Status::invalid_argument("path is required"));
+    }
+    Ok(PathBuf::from(path))
 }
 
 fn touch_coord(value: u32) -> u16 {
@@ -192,6 +226,7 @@ service_impl! {
                 arm7_bios: optional_path(request.arm7_bios_path),
                 arm9_bios: optional_path(request.arm9_bios_path),
                 rtc_unix_time: request.rtc_unix_time,
+                save: optional_path(request.save_path),
             };
             let session_id = (self.next_id.fetch_add(1, Ordering::Relaxed) + 1).to_string();
             let worker = Worker::spawn(session_id.clone(), request.rom_path.into(), opts)
@@ -477,6 +512,116 @@ service_impl! {
             Ok(Response::new(step_response(status)))
         }
 
+        async fn screenshot(
+            &self,
+            request: Request<pb::ScreenshotRequest>,
+        ) -> Result<Response<pb::Image>, Status> {
+            let request = request.into_inner();
+            let format = image_format_from_pb(request.format)?;
+            let image = self
+                .call(&request.session_id, move |session| session.screenshot(format))
+                .await?
+                .map_err(agent_error)?;
+            Ok(Response::new(pb::Image {
+                width: image.width,
+                height: image.height,
+                format: request.format,
+                data: image.data,
+            }))
+        }
+
+        async fn save_state(
+            &self,
+            request: Request<pb::StatePathRequest>,
+        ) -> Result<Response<pb::Empty>, Status> {
+            let request = request.into_inner();
+            let (path, include_save) = (required_path(request.path)?, request.include_save);
+            self.call(&request.session_id, move |session| {
+                session.save_state(path, include_save)
+            })
+            .await?
+            .map_err(agent_error)?;
+            Ok(Response::new(pb::Empty {}))
+        }
+
+        async fn load_state(
+            &self,
+            request: Request<pb::StatePathRequest>,
+        ) -> Result<Response<pb::SessionStatus>, Status> {
+            let request = request.into_inner();
+            let path = required_path(request.path)?;
+            let status = self
+                .call(&request.session_id, move |session| {
+                    session.load_state(path).map(|()| session.status())
+                })
+                .await?
+                .map_err(agent_error)?;
+            Ok(Response::new(status_to_pb(status)))
+        }
+
+        async fn save_state_bytes(
+            &self,
+            request: Request<pb::SaveStateBytesRequest>,
+        ) -> Result<Response<pb::StateBytes>, Status> {
+            let request = request.into_inner();
+            let include_save = request.include_save;
+            let state = self
+                .call(&request.session_id, move |session| {
+                    session.save_state_bytes(include_save)
+                })
+                .await?
+                .map_err(agent_error)?;
+            Ok(Response::new(pb::StateBytes {
+                state: state.state,
+                save: state.save,
+            }))
+        }
+
+        async fn load_state_bytes(
+            &self,
+            request: Request<pb::LoadStateBytesRequest>,
+        ) -> Result<Response<pb::SessionStatus>, Status> {
+            let request = request.into_inner();
+            let (state, save) = (request.state, request.save);
+            let status = self
+                .call(&request.session_id, move |session| {
+                    session
+                        .load_state_bytes(&state, save.as_deref())
+                        .map(|()| session.status())
+                })
+                .await?
+                .map_err(agent_error)?;
+            Ok(Response::new(status_to_pb(status)))
+        }
+
+        async fn export_save(
+            &self,
+            request: Request<pb::SaveFileRequest>,
+        ) -> Result<Response<pb::Empty>, Status> {
+            let request = request.into_inner();
+            let format = save_format_from_pb(request.format)?;
+            let path = required_path(request.path)?;
+            self.call(&request.session_id, move |session| {
+                session.export_save(path, format)
+            })
+            .await?
+            .map_err(agent_error)?;
+            Ok(Response::new(pb::Empty {}))
+        }
+
+        async fn import_save(
+            &self,
+            request: Request<pb::SaveFileRequest>,
+        ) -> Result<Response<pb::Empty>, Status> {
+            let request = request.into_inner();
+            save_format_from_pb(request.format)?;
+            let path = required_path(request.path)?;
+            self.call(&request.session_id, move |session| session.import_save(path))
+                .await?
+                .map_err(agent_error)?;
+            Ok(Response::new(pb::Empty {}))
+        }
+
         async fn set_keypad(
             &self,
             request: Request<pb::KeypadRequest>,
@@ -497,15 +642,6 @@ service_impl! {
     watch_write_remove(pb::HookRequest) -> pb::Empty;
     events(pb::SessionRequest) -> Self::EventsStream;
     r#continue(pb::SessionRequest) -> pb::Empty;
-
-    // Screen, save states and save files
-    screenshot(pb::ScreenshotRequest) -> pb::Image;
-    save_state(pb::StatePathRequest) -> pb::Empty;
-    load_state(pb::StatePathRequest) -> pb::SessionStatus;
-    save_state_bytes(pb::SaveStateBytesRequest) -> pb::StateBytes;
-    load_state_bytes(pb::LoadStateBytesRequest) -> pb::SessionStatus;
-    export_save(pb::SaveFileRequest) -> pb::Empty;
-    import_save(pb::SaveFileRequest) -> pb::Empty;
 
     // Observability
     memory_map(pb::SessionRequest) -> pb::MemoryMapResponse;

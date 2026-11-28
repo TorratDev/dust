@@ -10,3 +10,5 @@ dust-core = { path = "../../core" }
 dust-soft-2d = { path = "../../render/soft-2d" }
 dust-soft-3d = { path = "../../render/soft-3d" }
 chrono = "0.4"
+miniz_oxide = "0.8"
+png = "0.17"

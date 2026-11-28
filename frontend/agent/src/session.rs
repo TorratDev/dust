@@ -1,6 +1,6 @@
 use crate::{
     memory::{self, Cpu, Regs, WatchChange, Watches},
-    rtc, soft_renderer_3d, Keys,
+    rtc, soft_renderer_3d, states, Keys,
 };
 use chrono::{DateTime, NaiveDateTime};
 use dust_core::{
@@ -9,7 +9,7 @@ use dust_core::{
     ds_slot::{self, rom::header::Header},
     emu::{self, RunOutput},
     flash::Flash,
-    gpu::{engine_2d, engine_3d},
+    gpu::{engine_2d, engine_3d, Framebuffer},
     spi::firmware,
     utils::{zeroed_box, BoxedByteSlice, Bytes},
     Model, SaveContents,
@@ -30,6 +30,9 @@ pub struct SessionOptions {
     /// Fixed RTC time (Unix seconds, read as UTC wall-clock time). The clock does not advance, so
     /// runs are reproducible. `None` follows the host's local clock.
     pub rtc_unix_time: Option<i64>,
+    /// Cartridge save (raw `.sav` or DeSmuME `.dsv`); its size sets the save type. Without one the
+    /// cartridge has no save memory until [`Session::import_save`].
+    pub save: Option<PathBuf>,
 }
 
 /// Who controls the emulator's input.
@@ -77,12 +80,18 @@ pub enum Error {
     Shutdown,
     /// A bad memory/register request (size, register index, watch id).
     InvalidArgument(String),
+    /// A save state that can't be loaded.
+    InvalidState(String),
+    /// A cartridge save that can't be used (size, missing save).
+    InvalidSave(String),
+    /// The cartridge has no save memory to export.
+    NoSave,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Io { path, err } => write!(f, "couldn't read {}: {err}", path.display()),
+            Error::Io { path, err } => write!(f, "couldn't access {}: {err}", path.display()),
             Error::InvalidFirmware(msg) => write!(f, "invalid firmware: {msg}"),
             Error::InvalidBios(msg) => write!(f, "invalid BIOS: {msg}"),
             Error::InvalidRtcTime(time) => write!(f, "invalid RTC time: {time}"),
@@ -92,6 +101,11 @@ impl fmt::Display for Error {
             }
             Error::Shutdown => f.write_str("the emulated system shut down"),
             Error::InvalidArgument(msg) => f.write_str(msg),
+            Error::InvalidState(msg) => write!(f, "invalid state: {msg}"),
+            Error::InvalidSave(msg) => write!(f, "invalid save: {msg}"),
+            Error::NoSave => f.write_str(
+                "the session has no cartridge save (create it with a save file or import one)",
+            ),
         }
     }
 }
@@ -135,13 +149,15 @@ fn boxed_slice(bytes: &[u8], len: usize) -> BoxedByteSlice {
 }
 
 /// Everything needed to (re)build the emulator, loaded once from disk.
-struct Inputs {
+pub(crate) struct Inputs {
     rom: Vec<u8>,
     firmware: Option<Vec<u8>>,
     arm7_bios: Option<Vec<u8>>,
     arm9_bios: Option<Vec<u8>>,
     model: Model,
     rtc_base: Option<NaiveDateTime>,
+    /// Cartridge save the emulator is (re)built with.
+    pub(crate) save: Option<BoxedByteSlice>,
 }
 
 impl Inputs {
@@ -186,6 +202,11 @@ impl Inputs {
             arm9_bios: read_bios::<{ arm9::BIOS_SIZE }>(&opts.arm9_bios)?,
             model,
             rtc_base,
+            save: opts
+                .save
+                .as_deref()
+                .map(states::read_save_file)
+                .transpose()?,
         })
     }
 
@@ -215,10 +236,15 @@ impl Inputs {
         let (renderer_3d_tx, renderer_3d_rx) = soft_renderer_3d::init();
         let renderer_2d = dust_soft_2d::sync::Renderer::new(Box::new(renderer_3d_rx));
 
+        let spi = match &self.save {
+            Some(save) => states::spi_for_save(SaveContents::Existing(save.clone()))?,
+            None => ds_slot::spi::Empty::new().into(),
+        };
+
         let mut builder = emu::Builder::new(
             firmware,
             Some(rom),
-            ds_slot::spi::Empty::new().into(),
+            spi,
             Box::new(DummyAudioBackend),
             None,
             Box::new(rtc::Backend::new(self.rtc_base)),
@@ -249,16 +275,18 @@ impl Inputs {
 
 /// One emulator instance, advanced only by [`Session::step`].
 pub struct Session {
-    inputs: Inputs,
+    pub(crate) inputs: Inputs,
     pub(crate) emu: emu::Emu<Interpreter>,
     game_title: String,
-    frame: u64,
+    pub(crate) frame: u64,
     paused: bool,
     control: Control,
     watches: Watches,
     /// Agent input, applied before every frame (see `input.rs`).
     pub(crate) keys: Keys,
     pub(crate) touch: Option<[u16; 2]>,
+    /// Shown instead of the renderer's framebuffer until the next frame after loading a state.
+    pub(crate) screen_override: Option<Box<Framebuffer>>,
 }
 
 impl Session {
@@ -275,6 +303,7 @@ impl Session {
             watches: Watches::default(),
             keys: Keys::empty(),
             touch: None,
+            screen_override: None,
         })
     }
 
@@ -284,7 +313,10 @@ impl Session {
         for _ in 0..frames {
             self.apply_input();
             match self.emu.run() {
-                RunOutput::FrameFinished => self.frame += 1,
+                RunOutput::FrameFinished => {
+                    self.frame += 1;
+                    self.screen_override = None;
+                }
                 RunOutput::Shutdown => return Err(Error::Shutdown),
             }
         }
@@ -302,13 +334,14 @@ impl Session {
         self.paused = false;
     }
 
-    /// Rebuilds the emulator from the same ROM and options; the frame counter restarts at 0 and
-    /// agent input is released.
+    /// Rebuilds the emulator from the same ROM and options (and the last imported save); the frame
+    /// counter restarts at 0 and agent input is released.
     pub fn reset(&mut self) -> Result<(), Error> {
         self.emu = self.inputs.build_emu()?;
         self.frame = 0;
         self.keys = Keys::empty();
         self.touch = None;
+        self.screen_override = None;
         Ok(())
     }
 
