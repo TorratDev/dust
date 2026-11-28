@@ -1023,6 +1023,8 @@ dependencies = [
  "dust-core",
  "dust-soft-2d",
  "dust-soft-3d",
+ "miniz_oxide",
+ "png",
 ]
 
 [[package]]

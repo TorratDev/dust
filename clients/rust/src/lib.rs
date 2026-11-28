@@ -17,7 +17,9 @@ pub mod pb {
     tonic::include_proto!("dust_agent");
 }
 
-pub use pb::{Button, Control, Cpu, MemRange, Regs, WatchChange};
+pub use pb::{
+    Button, Control, Cpu, Image, ImageFormat, MemRange, Regs, SaveFormat, StateBytes, WatchChange,
+};
 
 use pb::dust_agent_client::DustAgentClient;
 use std::{
@@ -38,6 +40,9 @@ use tonic::transport::Channel;
 pub const HEADLESS_BIN_ENV: &str = "DUST_HEADLESS";
 
 const LISTENING_PREFIX: &str = "dust-headless listening on ";
+/// Largest request or reply (save states and big reads exceed gRPC's default 4 MiB); the
+/// server uses the same limit.
+const MAX_MESSAGE_SIZE: usize = 64 << 20;
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
@@ -106,6 +111,9 @@ pub struct SessionOptions {
     pub arm9_bios: Option<PathBuf>,
     /// Fixed RTC time in Unix seconds (UTC), for reproducible runs; `None` uses the host clock.
     pub rtc_unix_time: Option<i64>,
+    /// Cartridge save (raw `.sav` or DeSmuME `.dsv`); its size sets the save type. Without one
+    /// the cartridge has no save memory until [`Session::import_save`].
+    pub save: Option<PathBuf>,
 }
 
 /// One step of [`Session::sequence`]: hold exactly `buttons` (and touch `touch`, in bottom-screen
@@ -165,7 +173,10 @@ impl Client {
     /// Connects to a server, e.g. `"http://127.0.0.1:50051"`.
     pub async fn connect(endpoint: impl Into<String>) -> Result<Self> {
         Ok(Client {
-            grpc: DustAgentClient::connect(endpoint.into()).await?,
+            grpc: DustAgentClient::connect(endpoint.into())
+                .await?
+                .max_decoding_message_size(MAX_MESSAGE_SIZE)
+                .max_encoding_message_size(MAX_MESSAGE_SIZE),
         })
     }
 
@@ -188,6 +199,7 @@ impl Client {
                 arm7_bios_path: optional_absolute(&opts.arm7_bios)?,
                 arm9_bios_path: optional_absolute(&opts.arm9_bios)?,
                 rtc_unix_time: opts.rtc_unix_time,
+                save_path: optional_absolute(&opts.save)?,
             })
             .await?
             .into_inner();
@@ -558,6 +570,105 @@ impl Session {
             .set_keypad(pb::KeypadRequest {
                 session_id: self.id.clone(),
                 mask,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Both screens, top above bottom (256x384): 3 bytes per pixel for
+    /// [`ImageFormat::RawRgb`], a PNG file for [`ImageFormat::Png`].
+    pub async fn screenshot(&self, format: ImageFormat) -> Result<Image> {
+        Ok(self
+            .client
+            .grpc()
+            .screenshot(pb::ScreenshotRequest {
+                session_id: self.id.clone(),
+                format: format as i32,
+            })
+            .await?
+            .into_inner())
+    }
+
+    /// Writes a state file (the desktop GUI's savestate format) on the server;
+    /// `include_save` also stores the cartridge save.
+    pub async fn save_state(&self, path: impl AsRef<Path>, include_save: bool) -> Result<()> {
+        self.client
+            .grpc()
+            .save_state(pb::StatePathRequest {
+                session_id: self.id.clone(),
+                path: absolute(path.as_ref())?,
+                include_save,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Loads a state file from [`Session::save_state`] or the desktop GUI; the frame counter is
+    /// restored too. On error the session is unchanged.
+    pub async fn load_state(&self, path: impl AsRef<Path>) -> Result<Status> {
+        Ok(self
+            .client
+            .grpc()
+            .load_state(pb::StatePathRequest {
+                session_id: self.id.clone(),
+                path: absolute(path.as_ref())?,
+                include_save: false,
+            })
+            .await?
+            .into_inner()
+            .into())
+    }
+
+    /// An in-memory state, for fast resets with [`Session::load_state_bytes`].
+    pub async fn save_state_bytes(&self, include_save: bool) -> Result<StateBytes> {
+        Ok(self
+            .client
+            .grpc()
+            .save_state_bytes(pb::SaveStateBytesRequest {
+                session_id: self.id.clone(),
+                include_save,
+            })
+            .await?
+            .into_inner())
+    }
+
+    pub async fn load_state_bytes(&self, state: &StateBytes) -> Result<Status> {
+        Ok(self
+            .client
+            .grpc()
+            .load_state_bytes(pb::LoadStateBytesRequest {
+                session_id: self.id.clone(),
+                state: state.state.clone(),
+                save: state.save.clone(),
+            })
+            .await?
+            .into_inner()
+            .into())
+    }
+
+    /// Writes the cartridge save as a raw `.sav` or a DeSmuME `.dsv` on the server.
+    pub async fn export_save(&self, path: impl AsRef<Path>, format: SaveFormat) -> Result<()> {
+        self.client
+            .grpc()
+            .export_save(pb::SaveFileRequest {
+                session_id: self.id.clone(),
+                path: absolute(path.as_ref())?,
+                format: format as i32,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Replaces the cartridge save with a `.sav` or `.dsv` file (a DeSmuME footer is stripped,
+    /// like py-desmume's `backup.import_file`). The save type follows the file size and the save
+    /// is kept across [`Session::reset`]; games usually read it after a reset.
+    pub async fn import_save(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.client
+            .grpc()
+            .import_save(pb::SaveFileRequest {
+                session_id: self.id.clone(),
+                path: absolute(path.as_ref())?,
+                format: SaveFormat::Raw as i32,
             })
             .await?;
         Ok(())
