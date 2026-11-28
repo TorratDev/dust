@@ -49,6 +49,12 @@ pub struct Arm7<E: Engine> {
     #[cfg(feature = "debugger-hooks")]
     #[savestate(skip)]
     pub(crate) was_stopped_by_debug_hook: bool,
+    /// Skips the breakpoint check of the next instruction executed, whatever its address; set it
+    /// to resume from a breakpoint stop without hitting the same breakpoint again. Cleared as
+    /// soon as an instruction runs, so an exception taken first doesn't eat a later hit.
+    #[cfg(feature = "debugger-hooks")]
+    #[savestate(skip)]
+    pub skip_next_breakpoint: bool,
 }
 
 impl<E: Engine> Arm7<E> {
@@ -121,6 +127,8 @@ impl<E: Engine> Arm7<E> {
             is_stopped: false,
             #[cfg(feature = "debugger-hooks")]
             was_stopped_by_debug_hook: false,
+            #[cfg(feature = "debugger-hooks")]
+            skip_next_breakpoint: false,
         }
     }
 

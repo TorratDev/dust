@@ -1,9 +1,4 @@
-//! Integration tests against a real `dust-headless`.
-//!
-//! Needs the server binary, built from the repository root (nightly workspace):
-//!     cargo build --release -p dust-headless
-//! or pointed to with `DUST_HEADLESS`. The test ROM is generated with `tools/fetch_test_rom.sh`
-//! if missing; `DUST_TEST_ROM` selects another ROM.
+//! Integration tests against a real `dust-headless` (see `common/mod.rs`).
 
 mod common;
 
@@ -71,7 +66,7 @@ async fn planned_rpcs_are_unimplemented() {
     let err = session
         .client()
         .grpc()
-        .break_list(pb::SessionRequest {
+        .memory_map(pb::SessionRequest {
             session_id: session.id().to_owned(),
         })
         .await

@@ -4,6 +4,7 @@
 //! and advances it only when asked to. `Session` is not `Send`; servers create and use each one on
 //! its own thread (see `dust-agent-grpc`).
 
+mod breakpoints;
 mod input;
 pub mod memory;
 mod rtc;
@@ -12,6 +13,9 @@ mod session;
 mod soft_renderer_3d;
 mod states;
 
+pub use breakpoints::{
+    HitHandler, Hook, HookHit, HookKind, MemRange, MAX_HOOK_READ_LEN, MAX_WATCH_SIZE,
+};
 pub use input::{keys_from_desmume_mask, InputStep, Keys, LID_CLOSED, TOUCH_HEIGHT, TOUCH_WIDTH};
 pub use memory::{Cpu, Regs, WatchChange};
 pub use screen::{Image, ImageFormat, SCREENSHOT_HEIGHT, SCREENSHOT_WIDTH};
