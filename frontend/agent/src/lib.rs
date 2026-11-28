@@ -4,8 +4,10 @@
 //! and advances it only when asked to. `Session` is not `Send`; servers create and use each one on
 //! its own thread (see `dust-agent-grpc`).
 
+pub mod memory;
 mod rtc;
 mod session;
 mod soft_renderer_3d;
 
-pub use session::{Control, Error, Session, SessionOptions, Status};
+pub use memory::{Cpu, Regs, WatchChange};
+pub use session::{Control, Error, Session, SessionOptions, Status, StepResult};

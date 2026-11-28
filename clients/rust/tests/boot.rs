@@ -5,65 +5,10 @@
 //! or pointed to with `DUST_HEADLESS`. The test ROM is generated with `tools/fetch_test_rom.sh`
 //! if missing; `DUST_TEST_ROM` selects another ROM.
 
-use dust_client::{pb, Control, LaunchOptions, Session};
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-};
+mod common;
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-fn test_rom() -> PathBuf {
-    if let Some(rom) = std::env::var_os("DUST_TEST_ROM") {
-        return rom.into();
-    }
-    let rom = repo_root().join("tests/roms/test.nds");
-    if !rom.exists() {
-        let status = Command::new("bash")
-            .arg(repo_root().join("tools/fetch_test_rom.sh"))
-            .status()
-            .expect("couldn't run tools/fetch_test_rom.sh");
-        assert!(status.success(), "tools/fetch_test_rom.sh failed");
-    }
-    rom
-}
-
-fn headless_bin() -> PathBuf {
-    if let Some(bin) = std::env::var_os(dust_client::HEADLESS_BIN_ENV) {
-        return bin.into();
-    }
-    for profile in ["release", "debug"] {
-        let bin = repo_root()
-            .join("target")
-            .join(profile)
-            .join(format!("dust-headless{}", std::env::consts::EXE_SUFFIX));
-        if bin.exists() {
-            return bin;
-        }
-    }
-    panic!(
-        "dust-headless not found: run `cargo build --release -p dust-headless` in the repository \
-         root, or set {}",
-        dust_client::HEADLESS_BIN_ENV
-    );
-}
-
-async fn launch() -> Session {
-    dust_client::launch(
-        test_rom(),
-        &LaunchOptions {
-            headless_bin: Some(headless_bin()),
-            session: dust_client::SessionOptions {
-                rtc_unix_time: Some(1_700_000_000),
-                ..Default::default()
-            },
-        },
-    )
-    .await
-    .expect("couldn't launch dust-headless")
-}
+use common::{launch, test_rom};
+use dust_client::{pb, Control};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn boots_test_rom_for_60_cycles() {
@@ -126,11 +71,8 @@ async fn planned_rpcs_are_unimplemented() {
     let err = session
         .client()
         .grpc()
-        .read(pb::ReadRequest {
+        .break_list(pb::SessionRequest {
             session_id: session.id().to_owned(),
-            cpu: pb::Cpu::Arm9 as i32,
-            addr: 0x0200_0000,
-            len: 4,
         })
         .await
         .unwrap_err();
