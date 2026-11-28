@@ -487,9 +487,10 @@ impl CoreData for EngineData {
 
             #[inline]
             fn add_breakpoint(&mut self, addr: u32) {
-                if addr < self.next_breakpoint_addr
-                    && addr
-                        >= self.regs.cur[15].wrapping_sub(8 >> self.regs.cpsr.thumb_state() as u8)
+                let pc = self.regs.cur[15].wrapping_sub(8 >> self.regs.cpsr.thumb_state() as u8);
+                // The next breakpoint may have wrapped around to one behind the PC.
+                if addr >= pc
+                    && (addr < self.next_breakpoint_addr || self.next_breakpoint_addr < pc)
                 {
                     self.next_breakpoint_addr = addr;
                 }
@@ -552,6 +553,12 @@ impl Arm7Data for EngineData {
     #[inline]
     fn run_until(emu: &mut Emu<Interpreter>, end_time: Timestamp) {
         while emu.arm7.schedule.cur_time() < end_time {
+            // A watchpoint hit only ends the inner loop (the access can't return early); stop
+            // here instead of starting over with a new target time.
+            #[cfg(feature = "debugger-hooks")]
+            if emu.arm7.is_stopped {
+                return;
+            }
             Schedule::handle_pending_events(emu);
             emu.arm7
                 .schedule
@@ -618,17 +625,27 @@ impl Arm7Data for EngineData {
                 {
                     let r15 = reg!(emu.arm7, 15)
                         .wrapping_sub(8 >> emu.arm7.engine_data.regs.cpsr.thumb_state() as u8);
+                    let skip = core::mem::take(&mut emu.arm7.skip_next_breakpoint);
                     if emu.arm7.engine_data.next_breakpoint_addr == r15 {
-                        if let Some(breakpoint_hook) = emu.arm7.breakpoint_hook().as_ref() {
-                            if unsafe { breakpoint_hook.get()(emu, r15) } {
-                                emu.arm7
-                                    .schedule
-                                    .set_target_time(emu.arm7.schedule.cur_time());
-                                emu.arm7.was_stopped_by_debug_hook = true;
-                                emu.arm7.is_stopped = true;
-                                return;
+                        if !skip {
+                            if let Some(breakpoint_hook) = emu.arm7.breakpoint_hook().as_ref() {
+                                if unsafe { breakpoint_hook.get()(emu, r15) } {
+                                    emu.arm7
+                                        .schedule
+                                        .set_target_time(emu.arm7.schedule.cur_time());
+                                    emu.arm7.was_stopped_by_debug_hook = true;
+                                    emu.arm7.is_stopped = true;
+                                    return;
+                                }
                             }
                         }
+                        // Not stopping: look for the next breakpoint past this instruction,
+                        // so later ones in the same straight-line code still fire.
+                        get_next_breakpoint!(
+                            emu,
+                            r15.wrapping_add(1),
+                            1 | (!emu.arm7.engine_data.regs.cpsr.thumb_state() as u32) << 1
+                        );
                     }
                 }
                 #[cfg(feature = "interp-pipeline")]

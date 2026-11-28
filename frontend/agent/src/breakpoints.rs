@@ -105,9 +105,6 @@ enum Trigger {
 struct Shared {
     /// Triggers since the last stop, per core.
     triggers: [Vec<Trigger>; 2],
-    /// Breakpoint address each core is resuming from; its next check there is skipped once so
-    /// continuing doesn't hit the same breakpoint again.
-    skip: [Option<u32>; 2],
 }
 
 #[derive(Default)]
@@ -126,11 +123,7 @@ macro_rules! core_hooks {
         let shared = Rc::clone($shared);
         $emu.$core
             .set_breakpoint_hook(Some(BreakpointHook::new(Box::new(move |_emu, addr| {
-                let mut shared = shared.borrow_mut();
-                if shared.skip[$cpu.index()].take() == Some(addr) {
-                    return false;
-                }
-                shared.triggers[$cpu.index()].push(Trigger::Exec { addr });
+                shared.borrow_mut().triggers[$cpu.index()].push(Trigger::Exec { addr });
                 true
             }))));
         let shared = Rc::clone($shared);
@@ -263,8 +256,8 @@ impl Session {
         }))
     }
 
-    /// Stops after `cpu` stores to any of the `size` bytes from `addr`. DMA transfers don't
-    /// trigger watchpoints. Returns the hook id.
+    /// Stops after `cpu` (or a DMA transfer of its DMA controller) stores to any of the `size`
+    /// bytes from `addr`. Returns the hook id.
     pub fn watch_write_add(
         &mut self,
         cpu: Cpu,
@@ -314,11 +307,6 @@ impl Session {
                     match hook.cpu {
                         Cpu::Arm9 => self.emu.arm9.remove_breakpoint(hook.addr),
                         Cpu::Arm7 => self.emu.arm7.remove_breakpoint(hook.addr),
-                    }
-                    let mut shared = self.hooks.shared.borrow_mut();
-                    let skip = &mut shared.skip[hook.cpu.index()];
-                    if *skip == Some(hook.addr) {
-                        *skip = None;
                     }
                 }
             }
@@ -450,13 +438,13 @@ impl Session {
 
     fn handle_stop(&mut self) -> Result<(), Error> {
         let mut hits = Vec::new();
-        let mut exec_addrs = [None; 2];
+        let mut at_breakpoint = [false; 2];
         for cpu in [Cpu::Arm9, Cpu::Arm7] {
             let triggers =
                 std::mem::take(&mut self.hooks.shared.borrow_mut().triggers[cpu.index()]);
             for trigger in triggers {
-                if let Trigger::Exec { addr } = trigger {
-                    exec_addrs[cpu.index()] = Some(addr);
+                if let Trigger::Exec { .. } = trigger {
+                    at_breakpoint[cpu.index()] = true;
                 }
                 hits.extend(self.hits_for(cpu, trigger));
             }
@@ -479,20 +467,23 @@ impl Session {
             self.hooks.handler.get_or_insert(handler);
         }
 
-        // Resume the stopped cores; one stopped at a breakpoint must not hit it again right away.
-        // (A hook removed by the handler leaves no skip behind: removing clears it.)
-        let mut shared = self.hooks.shared.borrow_mut();
-        for (cpu, is_stopped) in [
-            (Cpu::Arm9, &mut self.emu.arm9.is_stopped),
-            (Cpu::Arm7, &mut self.emu.arm7.is_stopped),
+        // Resume the stopped cores; one stopped at a breakpoint skips the check of its next
+        // instruction so it doesn't hit the same breakpoint again. The core clears the skip once
+        // any instruction runs, so an IRQ taken on resume can't eat a later hit.
+        for (cpu, is_stopped, skip) in [
+            (
+                Cpu::Arm9,
+                &mut self.emu.arm9.is_stopped,
+                &mut self.emu.arm9.skip_next_breakpoint,
+            ),
+            (
+                Cpu::Arm7,
+                &mut self.emu.arm7.is_stopped,
+                &mut self.emu.arm7.skip_next_breakpoint,
+            ),
         ] {
             if std::mem::take(is_stopped) {
-                let still_set = |addr: &u32| {
-                    self.hooks.hooks.iter().any(|hook| {
-                        hook.kind == HookKind::Breakpoint && hook.cpu == cpu && hook.addr == *addr
-                    })
-                };
-                shared.skip[cpu.index()] = exec_addrs[cpu.index()].filter(still_set);
+                *skip = at_breakpoint[cpu.index()];
             }
         }
         result

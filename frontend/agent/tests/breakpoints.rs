@@ -1,15 +1,19 @@
 //! Breakpoints and write watchpoints against the generated test ROM: its ARM9 code at 0x02000000
-//! stores 0x5A as a word at 0x02001000 (`str` at 0x02000008), then spins at 0x0200000C.
+//! stores 0x5A as a word at 0x02001000 (`str` at 0x02000008), DMA-copies it to 0x02001004
+//! (started by the `stmia` at 0x02000018), then spins at 0x0200001C. See
+//! `tools/fetch_test_rom.sh`.
 
 mod common;
 
 use common::test_rom;
 use dust_agent::{Cpu, Error, HookHit, HookKind, MemRange, Session, SessionOptions};
+use dust_core::cpu::{arm9::Arm9, interpreter::Interpreter};
 use std::{cell::RefCell, ops::ControlFlow, rc::Rc};
 
 const ARM9_ENTRY: u32 = 0x0200_0000;
 const ARM9_STORE: u32 = 0x0200_0008;
-const ARM9_SPIN: u32 = 0x0200_000C;
+const ARM9_SPIN: u32 = 0x0200_001C;
+const DMA_DST: u32 = 0x0200_1004;
 const STORE_ADDR: u32 = 0x0200_1000;
 const STORE_VALUE: u32 = 0x5A;
 const ARM7_ENTRY: u32 = 0x0238_0000;
@@ -58,8 +62,8 @@ fn entry_breakpoint_fires_once_after_reset() {
     assert_eq!(hit.addr, ARM9_ENTRY);
     assert_eq!(hit.frame, 0);
     assert_eq!(hit.regs.gprs[15], ARM9_ENTRY);
-    // ldr r0, [pc, #8]
-    assert_eq!(hit.reads, vec![0xE59F_0008u32.to_le_bytes().to_vec()]);
+    // ldr r0, [pc, #0x18]
+    assert_eq!(hit.reads, vec![0xE59F_0018u32.to_le_bytes().to_vec()]);
 }
 
 #[test]
@@ -98,9 +102,9 @@ fn byte_watchpoint_inside_word_store() {
     session
         .watch_write_add(Cpu::Arm9, STORE_ADDR + 2, 1, Vec::new())
         .unwrap();
-    // Not watched: just past the stored word.
+    // Not written: just past the DMA destination word.
     session
-        .watch_write_add(Cpu::Arm9, STORE_ADDR + 4, 4, Vec::new())
+        .watch_write_add(Cpu::Arm9, DMA_DST + 4, 4, Vec::new())
         .unwrap();
     let hits = record(&mut session);
     session.step(1).unwrap();
@@ -182,4 +186,97 @@ fn handler_cannot_step_and_can_interrupt() {
     // The interrupted frame finishes on the next step.
     session.set_hit_handler(None);
     assert_eq!(session.step(1).unwrap().frame, 1);
+}
+
+fn exec_addrs(hits: &[HookHit]) -> Vec<u32> {
+    hits.iter().map(|hit| hit.addr).collect()
+}
+
+/// Breakpoints after another one in the same straight-line code (no branch in between) fire.
+#[test]
+fn straight_line_breakpoints_all_fire() {
+    let mut session = session();
+    for addr in [ARM9_ENTRY + 4, ARM9_STORE, ARM9_ENTRY + 0x10] {
+        session.break_add(Cpu::Arm9, addr, Vec::new()).unwrap();
+    }
+    let hits = record(&mut session);
+    session.step(2).unwrap();
+    assert_eq!(
+        exec_addrs(&hits.borrow()),
+        [ARM9_ENTRY + 4, ARM9_STORE, ARM9_ENTRY + 0x10]
+    );
+}
+
+/// A breakpoint added ahead of the PC fires even when the core's next breakpoint has wrapped
+/// around to one behind the PC.
+#[test]
+fn breakpoint_added_ahead_while_next_wrapped() {
+    let mut session = session();
+    session
+        .break_add(Cpu::Arm9, ARM9_ENTRY + 4, Vec::new())
+        .unwrap();
+    // Stops after the `str` (PC 0x0200000C), past the only breakpoint.
+    session
+        .watch_write_add(Cpu::Arm9, STORE_ADDR, 4, Vec::new())
+        .unwrap();
+    let hits = Rc::new(RefCell::new(Vec::new()));
+    let hits_ = Rc::clone(&hits);
+    session.set_hit_handler(Some(Box::new(move |session, hit| {
+        if hit.kind == HookKind::WriteWatchpoint {
+            session
+                .break_add(Cpu::Arm9, ARM9_ENTRY + 0x14, Vec::new())
+                .unwrap();
+        }
+        hits_.borrow_mut().push(hit.clone());
+        ControlFlow::Continue(())
+    })));
+    session.step(1).unwrap();
+    let hits = hits.borrow();
+    assert_eq!(
+        exec_addrs(&hits),
+        [ARM9_ENTRY + 4, STORE_ADDR, ARM9_ENTRY + 0x14],
+        "{hits:?}"
+    );
+}
+
+/// Resuming from a breakpoint only skips the instruction that runs first: if the CPU goes
+/// elsewhere first (as when an IRQ is taken on resume) and comes back, the breakpoint fires
+/// again. The detour is simulated by moving the PC back to the entry point.
+#[test]
+fn resume_skip_does_not_outlive_a_detour() {
+    let mut session = session();
+    session
+        .break_add(Cpu::Arm9, ARM9_ENTRY + 4, Vec::new())
+        .unwrap();
+    let hits = Rc::new(RefCell::new(0));
+    let hits_ = Rc::clone(&hits);
+    session.set_hit_handler(Some(Box::new(move |session, _hit| {
+        *hits_.borrow_mut() += 1;
+        if *hits_.borrow() == 1 {
+            let emu = session.emu();
+            let mut regs = emu.arm9.regs();
+            // r15 reads two ARM instructions ahead.
+            regs.gprs[15] = ARM9_ENTRY + 8;
+            Arm9::<Interpreter>::set_regs(emu, &regs);
+        }
+        ControlFlow::Continue(())
+    })));
+    session.step(1).unwrap();
+    assert_eq!(*hits.borrow(), 2);
+}
+
+#[test]
+fn write_watchpoint_fires_on_dma() {
+    let mut session = session();
+    let id = session
+        .watch_write_add(Cpu::Arm9, DMA_DST, 4, Vec::new())
+        .unwrap();
+    let hits = record(&mut session);
+    session.step(2).unwrap();
+    let hits = hits.borrow();
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(
+        (hits[0].id, hits[0].addr, hits[0].value),
+        (id, DMA_DST, STORE_VALUE)
+    );
 }

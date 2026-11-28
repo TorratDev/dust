@@ -8,7 +8,8 @@
 #
 # Generated ROM layout (tests rely on it):
 #   ARM9, entry 0x02000000: stores 0x5A as a word at 0x02001000 once (the `str` is at
-#   0x02000008), then spins with `b .` at 0x0200000C.
+#   0x02000008), then starts an immediate 32-bit DMA3 copy of that word to 0x02001004 (registers
+#   written by the `stmia` at 0x02000018), then spins with `b .` at 0x0200001C.
 #   ARM7, entry 0x02380000: spins with `b .`.
 # The header's ROM version byte (0x01E) is the generator version; an existing generated ROM with
 # an older version is regenerated.
@@ -24,7 +25,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out_dir="$root/tests/roms"
 out="$out_dir/test.nds"
 
-generator_version=1
+generator_version=2
 
 if [[ -f "$out" && "${1:-}" != "--force" ]]; then
     game_code="$(dd if="$out" bs=1 skip=$((0x00C)) count=4 status=none)"
@@ -67,12 +68,23 @@ le16() {
 rom_size=$((0x20000)) # 128 KiB, device capacity 0
 arm9_offset=$((0x200))
 arm9_addr=$((0x02000000))
-arm7_offset=$((0x220))
+arm7_offset=$((0x240))
 arm7_addr=$((0x02380000))
 # ARM `b .` (branch to self).
 spin_loop=$((0xEAFFFFFE))
-# ARM9 program: ldr r0, [pc, #8]; mov r1, #0x5A; str r1, [r0]; b .; .word 0x02001000
-arm9_code=(0xE59F0008 0xE3A0105A 0xE5801000 "$spin_loop" 0x02001000)
+# ARM9 program:
+#   ldr r0, =0x02001000; mov r1, #0x5A; str r1, [r0]
+#   ldr r2, =0x040000D4; add r3, r0, #4; ldr r4, =0x84000001
+#   stmia r2, {r0, r3, r4}   @ DMA3 source, destination, control (enable, 32-bit, 1 word)
+#   b .
+#   literal pool
+arm9_code=(
+    0xE59F0018 0xE3A0105A 0xE5801000
+    0xE59F2010 0xE2803004 0xE59F400C
+    0xE8820019
+    "$spin_loop"
+    0x02001000 0x040000D4 0x84000001
+)
 
 head -c "$rom_size" /dev/zero > "$tmp"
 
