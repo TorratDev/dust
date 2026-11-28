@@ -52,6 +52,13 @@ impl Worker {
                         return;
                     }
                 };
+                session.subscribe_logs(Box::new({
+                    let events = thread_events.clone();
+                    move |entry| {
+                        let _ = events.send(crate::log_event(entry));
+                        true
+                    }
+                }));
                 let jobs_rx = Rc::new(jobs_rx);
                 session.set_hit_handler(Some(Box::new({
                     let jobs_rx = Rc::clone(&jobs_rx);
@@ -98,7 +105,7 @@ impl Worker {
         }
     }
 
-    /// Subscribes to hook hits, returning the hit the session is stopped at, if any. Both happen
+    /// Subscribes to hook hits and log entries, returning the hit the session is stopped at, if any. Both happen
     /// on the session's thread, which sends the hits, so no hit is missed or seen twice.
     pub fn subscribe(
         &self,

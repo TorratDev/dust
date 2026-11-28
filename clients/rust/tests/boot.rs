@@ -66,7 +66,7 @@ async fn planned_rpcs_are_unimplemented() {
     let err = session
         .client()
         .grpc()
-        .memory_map(pb::SessionRequest {
+        .get_config(pb::SessionRequest {
             session_id: session.id().to_owned(),
         })
         .await

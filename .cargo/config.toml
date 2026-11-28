@@ -3,3 +3,8 @@ rustflags = [
     "-C", "target-feature=+atomics,+bulk-memory,+mutable-globals",
     "-C", "link-args=--shared-memory --max-memory=1073741824 --import-memory --export=__heap_base --export=__wasm_init_tls --export=__tls_size --export=__tls_align --export=__tls_base"
 ]
+
+[alias]
+# Optimized desktop build with the debugging views (memory editor, registers, disassembly, BG maps,
+# palettes, audio channels, ROM info, cartridge file system) and the log window.
+release-debug = "build --release -p dust-desktop --features log,debug-views"

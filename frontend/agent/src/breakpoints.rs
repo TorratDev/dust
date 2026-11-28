@@ -23,7 +23,12 @@ use dust_core::{
     emu::{self, RunOutput},
     utils::schedule::RawTimestamp,
 };
-use std::{cell::RefCell, ops::ControlFlow, rc::Rc};
+use std::{
+    cell::RefCell,
+    ops::ControlFlow,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 /// Largest write watchpoint, in bytes.
 pub const MAX_WATCH_SIZE: u32 = 0x1_0000;
@@ -335,12 +340,20 @@ impl Session {
     /// Emulates until the current frame finishes, handling hook hits on the way.
     pub(crate) fn run_frame(&mut self) -> Result<(), Error> {
         self.check_not_stopped()?;
+        // Emulation time only: time stopped at hooks doesn't count towards the frame's stats.
+        let mut emulation_time = Duration::ZERO;
         loop {
             // Effectively unlimited cycles: unlike `Emu::run`, this resumes mid-frame correctly
             // after a stop.
             let mut cycles: [RawTimestamp; 2] = [1 << 60; 2];
-            match self.emu.run_with_cycles(&mut cycles) {
-                RunOutput::FrameFinished => return Ok(()),
+            let start = Instant::now();
+            let output = self.emu.run_with_cycles(&mut cycles);
+            emulation_time += start.elapsed();
+            match output {
+                RunOutput::FrameFinished => {
+                    self.stats.record_frame(emulation_time);
+                    return Ok(());
+                }
                 RunOutput::Shutdown => return Err(Error::Shutdown),
                 RunOutput::StoppedByDebugHook => self.handle_stop()?,
                 RunOutput::CyclesOver(_) => {}

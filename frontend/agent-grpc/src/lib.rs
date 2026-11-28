@@ -7,8 +7,8 @@ pub mod pb {
 }
 
 use dust_agent::{
-    Control, Cpu, Hook, HookHit, HookKind, ImageFormat, InputStep, Keys, MemRange, SaveFormat,
-    SessionOptions, LID_CLOSED,
+    Control, Cpu, Hook, HookHit, HookKind, ImageFormat, InputStep, Keys, LogEntry, LogLevel,
+    MemRange, SaveFormat, SessionOptions, LID_CLOSED,
 };
 use pb::dust_agent_server::{DustAgent, DustAgentServer};
 use std::{
@@ -257,6 +257,45 @@ fn step_response(result: dust_agent::StepResult) -> pb::StepResponse {
                 old_data: change.old_data,
                 new_data: change.new_data,
             })
+            .collect(),
+    }
+}
+
+fn log_level_from_pb(level: i32) -> Result<LogLevel, Status> {
+    match pb::LogLevel::try_from(level) {
+        Ok(pb::LogLevel::Trace) => Ok(LogLevel::Trace),
+        Ok(pb::LogLevel::Debug) => Ok(LogLevel::Debug),
+        Ok(pb::LogLevel::Info) => Ok(LogLevel::Info),
+        Ok(pb::LogLevel::Warning) => Ok(LogLevel::Warning),
+        Ok(pb::LogLevel::Error) => Ok(LogLevel::Error),
+        Err(_) => Err(Status::invalid_argument(format!(
+            "unknown log level {level}"
+        ))),
+    }
+}
+
+pub(crate) fn log_event(entry: &LogEntry) -> pb::Event {
+    pb::Event {
+        kind: Some(pb::event::Kind::Log(log_entry_to_pb(entry))),
+    }
+}
+
+fn log_entry_to_pb(entry: &LogEntry) -> pb::LogEntry {
+    pb::LogEntry {
+        seq: entry.seq,
+        frame: entry.frame,
+        level: match entry.level {
+            LogLevel::Trace => pb::LogLevel::Trace,
+            LogLevel::Debug => pb::LogLevel::Debug,
+            LogLevel::Info => pb::LogLevel::Info,
+            LogLevel::Warning => pb::LogLevel::Warning,
+            LogLevel::Error => pb::LogLevel::Error,
+        } as i32,
+        message: entry.message.clone(),
+        fields: entry
+            .fields
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
             .collect(),
     }
 }
@@ -714,6 +753,103 @@ service_impl! {
             Ok(Response::new(pb::Empty {}))
         }
 
+        async fn memory_map(
+            &self,
+            request: Request<pb::SessionRequest>,
+        ) -> Result<Response<pb::MemoryMapResponse>, Status> {
+            let regions = self
+                .call(&request.into_inner().session_id, |session| session.memory_map())
+                .await?;
+            Ok(Response::new(pb::MemoryMapResponse {
+                regions: regions
+                    .into_iter()
+                    .map(|region| pb::MemoryRegion {
+                        name: region.name.to_owned(),
+                        cpu: cpu_to_pb(region.cpu) as i32,
+                        start: region.start,
+                        size: region.size,
+                    })
+                    .collect(),
+            }))
+        }
+
+        async fn dump(
+            &self,
+            request: Request<pb::DumpRequest>,
+        ) -> Result<Response<pb::ReadResponse>, Status> {
+            let request = request.into_inner();
+            let region = request.region;
+            let data = self
+                .call(&request.session_id, move |session| session.dump(&region))
+                .await?
+                .map_err(agent_error)?;
+            Ok(Response::new(pb::ReadResponse { data }))
+        }
+
+        async fn disasm(
+            &self,
+            request: Request<pb::DisasmRequest>,
+        ) -> Result<Response<pb::DisasmResponse>, Status> {
+            let request = request.into_inner();
+            let cpu = cpu_from_pb(request.cpu)?;
+            let instrs = self
+                .call(&request.session_id, move |session| {
+                    session.disasm(cpu, request.addr, request.count, request.thumb)
+                })
+                .await?
+                .map_err(agent_error)?;
+            Ok(Response::new(pb::DisasmResponse {
+                instructions: instrs
+                    .into_iter()
+                    .map(|instr| pb::Instruction {
+                        addr: instr.addr,
+                        raw: instr.raw,
+                        text: instr.text,
+                    })
+                    .collect(),
+            }))
+        }
+
+        async fn stats(
+            &self,
+            request: Request<pb::StatsRequest>,
+        ) -> Result<Response<pb::EmuStats>, Status> {
+            let request = request.into_inner();
+            let window = request.window;
+            let stats = self
+                .call(&request.session_id, move |session| session.stats(window))
+                .await?;
+            Ok(Response::new(pb::EmuStats {
+                fps: stats.fps,
+                speed_percent: stats.speed_percent,
+                frame_time_avg_us: stats.frame_time_avg_us,
+                frame_time_max_us: stats.frame_time_max_us,
+                late_frames: stats.late_frames,
+                dropped_frames: stats.dropped_frames,
+                total_frames: stats.total_frames,
+                polygons: stats.polygons,
+                vertices: stats.vertices,
+                polygon_ram_overflow: stats.polygon_ram_overflow,
+                vertex_ram_overflow: stats.vertex_ram_overflow,
+                geometry_fifo_level: stats.geometry_fifo_level,
+            }))
+        }
+
+        async fn logs(
+            &self,
+            request: Request<pb::LogsRequest>,
+        ) -> Result<Response<pb::LogsResponse>, Status> {
+            let request = request.into_inner();
+            let min_level = log_level_from_pb(request.min_level)?;
+            let since = request.since;
+            let entries = self
+                .call(&request.session_id, move |session| session.logs(since, min_level))
+                .await?;
+            Ok(Response::new(pb::LogsResponse {
+                entries: entries.iter().map(log_entry_to_pb).collect(),
+            }))
+        }
+
         async fn break_add(
             &self,
             request: Request<pb::BreakAddRequest>,
@@ -814,13 +950,6 @@ service_impl! {
         }
     }
 
-
-    // Observability
-    memory_map(pb::SessionRequest) -> pb::MemoryMapResponse;
-    dump(pb::DumpRequest) -> pb::ReadResponse;
-    disasm(pb::DisasmRequest) -> pb::DisasmResponse;
-    stats(pb::StatsRequest) -> pb::EmuStats;
-    logs(pb::LogsRequest) -> pb::LogsResponse;
 
     // Parallel sessions and RL
     step_batch(pb::StepBatchRequest) -> pb::StepBatchResponse;

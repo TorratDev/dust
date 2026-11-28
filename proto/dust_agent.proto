@@ -52,7 +52,7 @@ service DustAgent {
   rpc WatchWriteAdd(WatchWriteAddRequest) returns (HookId);
   rpc WatchWriteRemove(HookRequest) returns (Empty);
   // Breakpoint/watchpoint hits, logs and control changes. After a hit the emulator waits for
-  // Continue.
+  // Continue. Control changes aren't sent yet.
   rpc Events(SessionRequest) returns (stream Event);
   rpc Continue(SessionRequest) returns (Empty);
 
@@ -427,6 +427,10 @@ message SaveFileRequest {
 
 // --- Observability ------------------------------------------------------------------------------
 
+// Regions with their own storage (main_ram, shared_wram, arm7_wram, vram_a-vram_i, palettes, oam)
+// are dumped from that storage whatever the current mapping; `start` is where they're usually
+// mapped (VRAM banks: their LCDC address). I/O regions (arm9_io, arm7_io) are read through `cpu`'s
+// bus.
 message MemoryRegion {
   string name = 1;
   Cpu cpu = 2;
@@ -447,14 +451,18 @@ message DumpRequest {
 message DisasmRequest {
   string session_id = 1;
   Cpu cpu = 2;
+  // Aligned down to the instruction size.
   uint32 addr = 3;
+  // At most 65536.
   uint32 count = 4;
   bool thumb = 5;
 }
 
 message Instruction {
   uint32 addr = 1;
+  // The low 16 bits in Thumb state.
   uint32 raw = 2;
+  // As the desktop GUI's disassembly view shows it: the opcode, then " ; <comment>" if any.
   string text = 3;
 }
 
@@ -464,22 +472,32 @@ message DisasmResponse {
 
 message StatsRequest {
   string session_id = 1;
-  // Frames averaged over; 0 = server default.
+  // Frames averaged over; 0 = server default (60), at most 3600.
   uint32 window = 2;
 }
 
 message EmuStats {
+  // Frames emulated per second of emulation time over the window (time between Step calls
+  // doesn't count).
   double fps = 1;
+  // fps relative to the DS's ~59.83 FPS.
   double speed_percent = 2;
   double frame_time_avg_us = 3;
   double frame_time_max_us = 4;
+  // Since the session was created: frames that took longer to emulate than on a DS, and 3D frames
+  // the game didn't finish before VBlank (the previous one was shown again).
   uint64 late_frames = 5;
   uint64 dropped_frames = 6;
+  // Frames emulated since the session was created, across resets and state loads.
   uint64 total_frames = 7;
+  // The last 3D frame the game swapped in.
   uint32 polygons = 8;
   uint32 vertices = 9;
+  // The hardware's shared overflow flag (DISP3DCNT bit 13, sticky until acknowledged), attributed
+  // to polygon RAM when it was full (2048 polygons), vertex RAM otherwise.
   bool polygon_ram_overflow = 10;
   bool vertex_ram_overflow = 11;
+  // Commands in the geometry FIFO now (0-256).
   uint32 geometry_fifo_level = 12;
 }
 
@@ -491,16 +509,22 @@ enum LogLevel {
   LOG_LEVEL_ERROR = 4;
 }
 
+// A diagnostic from the emulator core (invalid I/O accesses, unimplemented features...).
 message LogEntry {
+  // 1, 2, 3... for the session's whole life.
   uint64 seq = 1;
+  // Frames finished when it was logged.
   uint64 frame = 2;
   LogLevel level = 3;
   string message = 4;
+  // The logging component, e.g. cpu = "arm9", gpu, spi, ds_rom = "normal" (keys without a value
+  // map to ""), plus any per-message key-values.
+  map<string, string> fields = 5;
 }
 
 message LogsRequest {
   string session_id = 1;
-  // Only entries with seq > since.
+  // Only entries with seq > since. The server keeps the last 4096.
   uint64 since = 2;
   LogLevel min_level = 3;
 }

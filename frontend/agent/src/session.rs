@@ -1,6 +1,10 @@
 use crate::{
     breakpoints::Hooks,
     memory::{self, Cpu, Regs, WatchChange, Watches},
+    observe::{
+        self, Instruction, LogCapture, LogEntry, LogLevel, LogSubscriber, MemoryRegion, Stats,
+        StatsTracker, StatsTx,
+    },
     rtc, soft_renderer_3d, states, Keys,
 };
 use chrono::{DateTime, NaiveDateTime};
@@ -15,7 +19,7 @@ use dust_core::{
     utils::{zeroed_box, BoxedByteSlice, Bytes},
     Model, SaveContents,
 };
-use std::{fmt, fs, io, path::PathBuf};
+use std::{fmt, fs, io, path::PathBuf, sync::atomic::Ordering};
 
 /// Options for [`Session::new`].
 #[derive(Clone, Debug, Default)]
@@ -236,7 +240,12 @@ impl Inputs {
             .to_owned()
     }
 
-    fn build_emu(&self) -> Result<emu::Emu<Interpreter>, Error> {
+    fn build_emu(
+        &self,
+        logs: &LogCapture,
+        stats: &StatsTracker,
+    ) -> Result<emu::Emu<Interpreter>, Error> {
+        let logger = logs.logger();
         let firmware = match &self.firmware {
             Some(firmware) => boxed_slice(firmware, firmware.len()),
             None => firmware::default(self.model),
@@ -244,6 +253,7 @@ impl Inputs {
         let firmware = Flash::new(
             SaveContents::Existing(firmware),
             firmware::id_for_model(self.model),
+            logger.new(slog::o!("fw" => "")),
         )
         .map_err(|err| Error::InvalidFirmware(format!("{err:?}")))?;
 
@@ -254,8 +264,8 @@ impl Inputs {
         let renderer_2d = dust_soft_2d::sync::Renderer::new(Box::new(renderer_3d_rx));
 
         let spi = match &self.save {
-            Some(save) => states::spi_for_save(SaveContents::Existing(save.clone()))?,
-            None => ds_slot::spi::Empty::new().into(),
+            Some(save) => states::spi_for_save(SaveContents::Existing(save.clone()), &logger)?,
+            None => ds_slot::spi::Empty::new(logger.new(slog::o!("ds_spi" => "empty"))).into(),
         };
 
         let mut builder = emu::Builder::new(
@@ -266,8 +276,12 @@ impl Inputs {
             None,
             Box::new(rtc::Backend::new(self.rtc_base)),
             Box::new(renderer_2d) as Box<dyn engine_2d::Renderer>,
-            Box::new(renderer_3d_tx) as Box<dyn engine_3d::RendererTx>,
+            Box::new(StatsTx::new(
+                Box::new(renderer_3d_tx),
+                stats.shared_3d.clone(),
+            )) as Box<dyn engine_3d::RendererTx>,
             None,
+            logger,
         );
         builder.arm7_bios = boxed_bios(&self.arm7_bios);
         builder.arm9_bios = boxed_bios(&self.arm9_bios);
@@ -306,12 +320,18 @@ pub struct Session {
     pub(crate) hooks: Hooks,
     /// Shown instead of the renderer's framebuffer until the next frame after loading a state.
     pub(crate) screen_override: Option<Box<Framebuffer>>,
+    logs: LogCapture,
+    /// Root logger of the emulator's components.
+    pub(crate) logger: slog::Logger,
+    pub(crate) stats: StatsTracker,
 }
 
 impl Session {
     pub fn new(rom: impl Into<PathBuf>, opts: &SessionOptions) -> Result<Self, Error> {
         let inputs = Inputs::load(&rom.into(), opts)?;
-        let mut emu = inputs.build_emu()?;
+        let logs = LogCapture::default();
+        let stats = StatsTracker::default();
+        let mut emu = inputs.build_emu(&logs, &stats)?;
         let mut hooks = Hooks::default();
         hooks.install(&mut emu);
         Ok(Session {
@@ -326,6 +346,9 @@ impl Session {
             touch: None,
             hooks,
             screen_override: None,
+            logger: logs.logger(),
+            logs,
+            stats,
         })
     }
 
@@ -335,6 +358,7 @@ impl Session {
     pub fn step(&mut self, frames: u32) -> Result<StepResult, Error> {
         for _ in 0..frames {
             self.apply_input();
+            self.logs.frame.store(self.frame, Ordering::Relaxed);
             self.run_frame()?;
             self.frame += 1;
             self.screen_override = None;
@@ -359,7 +383,7 @@ impl Session {
         if self.current_hit().is_some() {
             return Err(Error::StoppedAtHook);
         }
-        self.emu = self.inputs.build_emu()?;
+        self.emu = self.inputs.build_emu(&self.logs, &self.stats)?;
         self.hooks.install(&mut self.emu);
         self.frame = 0;
         self.keys = Keys::empty();
@@ -408,6 +432,45 @@ impl Session {
 
     pub fn unwatch(&mut self, watch_id: u32) -> Result<(), Error> {
         self.watches.remove(watch_id)
+    }
+
+    /// The named memory regions [`Session::dump`] accepts.
+    pub fn memory_map(&self) -> Vec<MemoryRegion> {
+        observe::memory_map(&self.emu)
+    }
+
+    /// The contents of a region from [`Session::memory_map`].
+    pub fn dump(&mut self, region: &str) -> Result<Vec<u8>, Error> {
+        observe::dump(&mut self.emu, region)
+    }
+
+    /// Disassembles `count` instructions from `addr` (aligned down to the instruction size), as
+    /// `cpu` sees memory, like the desktop GUI's disassembly view.
+    pub fn disasm(
+        &mut self,
+        cpu: Cpu,
+        addr: u32,
+        count: u32,
+        thumb: bool,
+    ) -> Result<Vec<Instruction>, Error> {
+        observe::disasm(&mut self.emu, cpu, addr, count, thumb)
+    }
+
+    /// Emulator health over the last `window` frames (0 = [`observe::DEFAULT_STATS_WINDOW`]).
+    pub fn stats(&self, window: u32) -> Stats {
+        self.stats.stats(&self.emu, window)
+    }
+
+    /// Captured core diagnostics (invalid I/O accesses, unimplemented features...) with
+    /// `seq > since` and at least `min_level`; the last [`observe::LOG_CAPACITY`] are kept.
+    pub fn logs(&self, since: u64, min_level: LogLevel) -> Vec<LogEntry> {
+        self.logs.entries(since, min_level)
+    }
+
+    /// Calls `subscriber` with every new log entry, from the session's thread, until it returns
+    /// `false`.
+    pub fn subscribe_logs(&self, subscriber: LogSubscriber) {
+        self.logs.subscribe(subscriber);
     }
 
     pub fn emu(&mut self) -> &mut emu::Emu<Interpreter> {

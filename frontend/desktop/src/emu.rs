@@ -163,7 +163,7 @@ fn read_save_file_contents(save_path: &PathBuf) -> io::Result<Option<BoxedByteSl
 fn setup_ds_slot(
     ds_slot: Option<DsSlot>,
     save_path: &Option<PathBuf>,
-    #[cfg(feature = "log")] logger: &slog::Logger,
+    #[cfg(core_log)] logger: &slog::Logger,
 ) -> (Option<Box<dyn ds_slot::rom::Contents>>, ds_slot::spi::Spi) {
     if let Some(ds_slot) = ds_slot {
         let rom: Box<dyn ds_slot::rom::Contents> = ds_slot.rom.into();
@@ -226,7 +226,7 @@ fn setup_ds_slot(
 
         let spi = if save_type == SaveType::None {
             ds_slot::spi::Empty::new(
-                #[cfg(feature = "log")]
+                #[cfg(core_log)]
                 logger.new(slog::o!("ds_spi" => "empty")),
             )
             .into()
@@ -250,7 +250,7 @@ fn setup_ds_slot(
                 SaveType::Eeprom4k => ds_slot::spi::eeprom_4k::Eeprom4k::new(
                     save_contents,
                     None,
-                    #[cfg(feature = "log")]
+                    #[cfg(core_log)]
                     logger.new(slog::o!("ds_spi" => "eeprom_4k")),
                 )
                 // NOTE: The save contents' size is ensured beforehand, this should never occur.
@@ -260,7 +260,7 @@ fn setup_ds_slot(
                     ds_slot::spi::eeprom_fram::EepromFram::new(
                         save_contents,
                         None,
-                        #[cfg(feature = "log")]
+                        #[cfg(core_log)]
                         logger.new(slog::o!("ds_spi" => "eeprom_fram")),
                     )
                     // NOTE: The save contents' size is ensured beforehand, this should never occur.
@@ -272,7 +272,7 @@ fn setup_ds_slot(
                         save_contents,
                         [0; 20],
                         ds_slot.has_ir,
-                        #[cfg(feature = "log")]
+                        #[cfg(core_log)]
                         logger.new(
                             slog::o!("ds_spi" => if ds_slot.has_ir { "flash" } else { "flash_ir" }),
                         ),
@@ -287,7 +287,7 @@ fn setup_ds_slot(
                         "TODO: NAND saves are currently unsupported, falling back to no save file.",
                     );
                     ds_slot::spi::Empty::new(
-                        #[cfg(feature = "log")]
+                        #[cfg(core_log)]
                         logger.new(slog::o!("ds_spi" => "nand_todo")),
                     )
                     .into()
@@ -300,7 +300,7 @@ fn setup_ds_slot(
         (
             None,
             ds_slot::spi::Empty::new(
-                #[cfg(feature = "log")]
+                #[cfg(core_log)]
                 logger.new(slog::o!("ds_spi" => "empty")),
             )
             .into(),
@@ -412,6 +412,11 @@ pub(super) fn run(
         logger,
     }: LaunchData,
 ) -> triple_buffer::Sender<FrameData> {
+    // dust-core can have logging enabled by another crate in the same build (such as dust-agent)
+    // while this one doesn't log; its diagnostics are discarded then.
+    #[cfg(all(core_log, not(feature = "logging")))]
+    let logger = slog::Logger::root(slog::Discard, slog::o!());
+
     macro_rules! notif {
         ($value: expr) => {
             to_ui
@@ -427,7 +432,7 @@ pub(super) fn run(
                 .unwrap_or_else(|| firmware::default(model)),
         ),
         firmware::id_for_model(model),
-        #[cfg(feature = "log")]
+        #[cfg(core_log)]
         logger.new(slog::o!("fw" => "")),
     )
     // NOTE: The firmware's size is checked before launch, this should never occur.
@@ -436,7 +441,7 @@ pub(super) fn run(
     let (ds_slot_rom, ds_slot_spi) = setup_ds_slot(
         ds_slot,
         &save_path,
-        #[cfg(feature = "log")]
+        #[cfg(core_log)]
         &logger,
     );
 
@@ -459,7 +464,7 @@ pub(super) fn run(
         }),
         #[cfg(not(feature = "dldi"))]
         None,
-        #[cfg(feature = "log")]
+        #[cfg(core_log)]
         logger.clone(),
     );
 
@@ -759,7 +764,7 @@ pub(super) fn run(
                 renderer_2d,
                 renderer_3d_tx,
                 emu.dldi.map(|dldi| dldi.into_provider()),
-                #[cfg(feature = "log")]
+                #[cfg(core_log)]
                 logger.clone(),
             );
 
@@ -809,6 +814,9 @@ pub(super) fn run(
                         gdb_server.emu_shutdown();
                     }
                 }
+                // Without the GDB server no hooks are installed, so these don't happen.
+                #[cfg(all(core_debugger_hooks, not(feature = "gdb-server")))]
+                RunOutput::StoppedByDebugHook | RunOutput::CyclesOver(_) => {}
                 #[cfg(feature = "gdb-server")]
                 RunOutput::StoppedByDebugHook => {}
                 #[cfg(feature = "gdb-server")]
