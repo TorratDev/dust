@@ -1,7 +1,7 @@
 //! Agent input: held buttons and touch live in the [`Session`] and are applied as a full set
 //! before every emulated frame, bypassing the keyboard and the keymap.
 
-use crate::{Error, Session, Status};
+use crate::{Error, Session, StepResult};
 pub use dust_core::emu::input::Keys;
 
 /// The lid switch (EXTKEYIN bit 7, bit 23 of the combined status). Unlike buttons, its bit is set
@@ -72,7 +72,7 @@ impl Session {
     }
 
     /// Holds `keys` for `frames` frames, then releases them.
-    pub fn press(&mut self, keys: Keys, frames: u32) -> Result<Status, Error> {
+    pub fn press(&mut self, keys: Keys, frames: u32) -> Result<StepResult, Error> {
         self.hold(keys);
         let result = self.step(frames);
         self.release(keys);
@@ -93,10 +93,13 @@ impl Session {
 
     /// Touches (`x`, `y`) for `frames` frames, then lifts the pen. With `frames` = 0 the pen stays
     /// down until [`Session::touch_end`] (the API has no separate touch-down call).
-    pub fn touch(&mut self, x: u16, y: u16, frames: u32) -> Result<Status, Error> {
+    pub fn touch(&mut self, x: u16, y: u16, frames: u32) -> Result<StepResult, Error> {
         self.touch_start(x, y)?;
         if frames == 0 {
-            return Ok(self.status());
+            return Ok(StepResult {
+                status: self.status(),
+                changes: Vec::new(),
+            });
         }
         let result = self.step(frames);
         self.touch_end();
@@ -104,24 +107,32 @@ impl Session {
     }
 
     /// Runs `steps` in order; afterwards the held buttons and touch are back to what they were.
-    pub fn sequence(&mut self, steps: &[InputStep]) -> Result<Status, Error> {
+    /// The watch changes of every step are returned together.
+    pub fn sequence(&mut self, steps: &[InputStep]) -> Result<StepResult, Error> {
         for step in steps {
             if let Some([x, y]) = step.touch {
                 check_touch(x, y)?;
             }
         }
         let (prev_keys, prev_touch) = (self.keys, self.touch);
-        let mut result = Ok(self.status());
+        let mut changes = Vec::new();
+        let mut result = Ok(());
         for step in steps {
             self.keys = step.keys;
             self.touch = step.touch;
-            result = self.step(step.frames);
-            if result.is_err() {
-                break;
+            match self.step(step.frames) {
+                Ok(step_result) => changes.extend(step_result.changes),
+                Err(err) => {
+                    result = Err(err);
+                    break;
+                }
             }
         }
         (self.keys, self.touch) = (prev_keys, prev_touch);
-        result
+        result.map(|()| StepResult {
+            status: self.status(),
+            changes,
+        })
     }
 
     /// Makes the emulated input match the agent's: presses held buttons, releases the rest.

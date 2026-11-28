@@ -210,10 +210,19 @@ fn touch_coord(value: u32) -> u16 {
     value.min(u16::MAX as u32) as u16
 }
 
-fn step_response(status: dust_agent::Status) -> pb::StepResponse {
+fn step_response(result: dust_agent::StepResult) -> pb::StepResponse {
     pb::StepResponse {
-        status: Some(status_to_pb(status)),
-        changes: Vec::new(),
+        status: Some(status_to_pb(result.status)),
+        changes: result
+            .changes
+            .into_iter()
+            .map(|change| pb::WatchChange {
+                watch_id: change.watch_id,
+                addr: change.addr,
+                old_data: change.old_data,
+                new_data: change.new_data,
+            })
+            .collect(),
     }
 }
 
@@ -311,11 +320,122 @@ service_impl! {
         ) -> Result<Response<pb::StepResponse>, Status> {
             let request = request.into_inner();
             let frames = request.frames;
-            let status = self
+            let result = self
                 .call(&request.session_id, move |session| session.step(frames))
                 .await?
                 .map_err(agent_error)?;
-            Ok(Response::new(step_response(status)))
+            Ok(Response::new(step_response(result)))
+        }
+
+        async fn read(
+            &self,
+            request: Request<pb::ReadRequest>,
+        ) -> Result<Response<pb::ReadResponse>, Status> {
+            let request = request.into_inner();
+            let cpu = cpu_from_pb(request.cpu)?;
+            let data = self
+                .call(&request.session_id, move |session| {
+                    session.read(cpu, request.addr, request.len)
+                })
+                .await?
+                .map_err(agent_error)?;
+            Ok(Response::new(pb::ReadResponse { data }))
+        }
+
+        async fn read_many(
+            &self,
+            request: Request<pb::ReadManyRequest>,
+        ) -> Result<Response<pb::ReadManyResponse>, Status> {
+            let request = request.into_inner();
+            let cpu = cpu_from_pb(request.cpu)?;
+            let data = self
+                .call(&request.session_id, move |session| {
+                    request
+                        .ranges
+                        .iter()
+                        .map(|range| session.read(cpu, range.addr, range.len))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .await?
+                .map_err(agent_error)?;
+            Ok(Response::new(pb::ReadManyResponse { data }))
+        }
+
+        async fn write(
+            &self,
+            request: Request<pb::WriteRequest>,
+        ) -> Result<Response<pb::Empty>, Status> {
+            let request = request.into_inner();
+            let cpu = cpu_from_pb(request.cpu)?;
+            let value = request
+                .value
+                .ok_or_else(|| Status::invalid_argument("data or word is required"))?;
+            self.call(&request.session_id, move |session| match value {
+                pb::write_request::Value::Data(data) => session.write(cpu, request.addr, &data),
+                pb::write_request::Value::Word(word) => {
+                    session.write_value(cpu, request.addr, word.value, word.size)
+                }
+            })
+            .await?
+            .map_err(agent_error)?;
+            Ok(Response::new(pb::Empty {}))
+        }
+
+        async fn get_regs(
+            &self,
+            request: Request<pb::RegsRequest>,
+        ) -> Result<Response<pb::Regs>, Status> {
+            let request = request.into_inner();
+            let cpu = cpu_from_pb(request.cpu)?;
+            let regs = self
+                .call(&request.session_id, move |session| session.regs(cpu))
+                .await?;
+            Ok(Response::new(pb::Regs {
+                gprs: regs.gprs.to_vec(),
+                cpsr: regs.cpsr,
+            }))
+        }
+
+        async fn set_reg(
+            &self,
+            request: Request<pb::SetRegRequest>,
+        ) -> Result<Response<pb::Empty>, Status> {
+            let request = request.into_inner();
+            let cpu = cpu_from_pb(request.cpu)?;
+            self.call(&request.session_id, move |session| {
+                session.set_reg(cpu, request.reg, request.value)
+            })
+            .await?
+            .map_err(agent_error)?;
+            Ok(Response::new(pb::Empty {}))
+        }
+
+        async fn watch(
+            &self,
+            request: Request<pb::WatchRequest>,
+        ) -> Result<Response<pb::WatchResponse>, Status> {
+            let request = request.into_inner();
+            let cpu = cpu_from_pb(request.cpu)?;
+            let watch_id = self
+                .call(&request.session_id, move |session| {
+                    session.watch(cpu, request.addr, request.len)
+                })
+                .await?
+                .map_err(agent_error)?;
+            Ok(Response::new(pb::WatchResponse { watch_id }))
+        }
+
+        async fn unwatch(
+            &self,
+            request: Request<pb::UnwatchRequest>,
+        ) -> Result<Response<pb::Empty>, Status> {
+            let request = request.into_inner();
+            self.call(&request.session_id, move |session| {
+                session.unwatch(request.watch_id)
+            })
+            .await?
+            .map_err(agent_error)?;
+            Ok(Response::new(pb::Empty {}))
         }
 
         async fn pause(
@@ -548,14 +668,6 @@ service_impl! {
         }
     }
 
-    // Memory and CPU
-    read(pb::ReadRequest) -> pb::ReadResponse;
-    read_many(pb::ReadManyRequest) -> pb::ReadManyResponse;
-    write(pb::WriteRequest) -> pb::Empty;
-    get_regs(pb::RegsRequest) -> pb::Regs;
-    set_reg(pb::SetRegRequest) -> pb::Empty;
-    watch(pb::WatchRequest) -> pb::WatchResponse;
-    unwatch(pb::UnwatchRequest) -> pb::Empty;
 
     // Screen, save states and save files
     screenshot(pb::ScreenshotRequest) -> pb::Image;

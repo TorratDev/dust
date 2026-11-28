@@ -9,11 +9,12 @@
 //! The emulator side reuses dust-core's debugger hooks, as set up by the desktop GDB server
 //! (`frontend/desktop/src/emu/gdb_server.rs`).
 
-use crate::{Error, Session};
+use crate::{
+    memory::{self, Cpu, Regs},
+    Error, Session,
+};
 use dust_core::{
     cpu::{
-        arm7, arm9,
-        bus::DebugCpuAccess,
         debug::{
             BreakpointHook, MemWatchpointHook, MemWatchpointRwMask, MemWatchpointTriggerCause,
         },
@@ -28,19 +29,6 @@ use std::{cell::RefCell, ops::ControlFlow, rc::Rc};
 pub const MAX_WATCH_SIZE: u32 = 0x1_0000;
 /// Largest total length of the reads registered with one hook, in bytes.
 pub const MAX_HOOK_READ_LEN: u32 = 0x10_0000;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum Cpu {
-    #[default]
-    Arm9,
-    Arm7,
-}
-
-impl Cpu {
-    fn index(self) -> usize {
-        self as usize
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MemRange {
@@ -67,13 +55,6 @@ pub struct Hook {
     pub reads: Vec<MemRange>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct CpuRegs {
-    /// r0-r15 of the current mode; r15 is the address of the next instruction to execute.
-    pub gprs: [u32; 16],
-    pub cpsr: u32,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HookHit {
     pub id: u32,
@@ -85,7 +66,8 @@ pub struct HookHit {
     pub value: u32,
     /// Frames finished before the hit.
     pub frame: u64,
-    pub regs: CpuRegs,
+    /// As [`Session::regs`] reports them: r15 reads ahead of the next instruction to execute.
+    pub regs: Regs,
     /// Results of the hook's reads, in order.
     pub reads: Vec<Vec<u8>>,
 }
@@ -123,7 +105,7 @@ macro_rules! core_hooks {
         let shared = Rc::clone($shared);
         $emu.$core
             .set_breakpoint_hook(Some(BreakpointHook::new(Box::new(move |_emu, addr| {
-                shared.borrow_mut().triggers[$cpu.index()].push(Trigger::Exec { addr });
+                shared.borrow_mut().triggers[$cpu as usize].push(Trigger::Exec { addr });
                 true
             }))));
         let shared = Rc::clone($shared);
@@ -133,7 +115,7 @@ macro_rules! core_hooks {
                     if cause != MemWatchpointTriggerCause::Write {
                         return false;
                     }
-                    shared.borrow_mut().triggers[$cpu.index()].push(Trigger::Write { addr, size });
+                    shared.borrow_mut().triggers[$cpu as usize].push(Trigger::Write { addr, size });
                     true
                 },
             ))));
@@ -141,29 +123,14 @@ macro_rules! core_hooks {
 }
 
 fn read_bytes(emu: &mut emu::Emu<Interpreter>, cpu: Cpu, range: MemRange) -> Vec<u8> {
-    (0..range.len)
-        .map(|i| {
-            let addr = range.addr.wrapping_add(i);
-            match cpu {
-                Cpu::Arm9 => arm9::bus::read_8::<DebugCpuAccess, _>(emu, addr),
-                Cpu::Arm7 => arm7::bus::read_8::<DebugCpuAccess, _>(emu, addr),
-            }
-        })
-        .collect()
+    memory::read_unchecked(emu, cpu, range.addr, range.len)
 }
 
-fn regs(emu: &emu::Emu<Interpreter>, cpu: Cpu) -> CpuRegs {
-    let (regs, cpsr) = match cpu {
-        Cpu::Arm9 => (emu.arm9.regs(), emu.arm9.cpsr()),
-        Cpu::Arm7 => (emu.arm7.regs(), emu.arm7.cpsr()),
-    };
-    let mut gprs = regs.gprs;
-    // r15 reads two instructions ahead (pipeline); report the next instruction's address.
-    gprs[15] = gprs[15].wrapping_sub(8 >> cpsr.thumb_state() as u8);
-    CpuRegs {
-        gprs,
-        cpsr: cpsr.raw(),
-    }
+/// Address of the instruction `cpu` executes next.
+fn next_pc(emu: &emu::Emu<Interpreter>, cpu: Cpu) -> u32 {
+    let regs = memory::regs(emu, cpu);
+    let thumb = regs.cpsr & 1 << 5 != 0;
+    regs.gprs[15].wrapping_sub(8 >> thumb as u8)
 }
 
 fn add_breakpoint(emu: &mut emu::Emu<Interpreter>, cpu: Cpu, addr: u32) {
@@ -382,7 +349,7 @@ impl Session {
     }
 
     fn hits_for(&mut self, cpu: Cpu, trigger: Trigger) -> Vec<HookHit> {
-        let regs = regs(&self.emu, cpu);
+        let regs = memory::regs(&self.emu, cpu);
         let (kind, addr, value) = match trigger {
             Trigger::Exec { addr } => (HookKind::Breakpoint, addr, 0),
             Trigger::Write { addr, size } => {
@@ -438,13 +405,13 @@ impl Session {
 
     fn handle_stop(&mut self) -> Result<(), Error> {
         let mut hits = Vec::new();
-        let mut at_breakpoint = [false; 2];
+        let mut exec_addrs = [None; 2];
         for cpu in [Cpu::Arm9, Cpu::Arm7] {
             let triggers =
-                std::mem::take(&mut self.hooks.shared.borrow_mut().triggers[cpu.index()]);
+                std::mem::take(&mut self.hooks.shared.borrow_mut().triggers[cpu as usize]);
             for trigger in triggers {
-                if let Trigger::Exec { .. } = trigger {
-                    at_breakpoint[cpu.index()] = true;
+                if let Trigger::Exec { addr } = trigger {
+                    exec_addrs[cpu as usize] = Some(addr);
                 }
                 hits.extend(self.hits_for(cpu, trigger));
             }
@@ -468,8 +435,10 @@ impl Session {
         }
 
         // Resume the stopped cores; one stopped at a breakpoint skips the check of its next
-        // instruction so it doesn't hit the same breakpoint again. The core clears the skip once
-        // any instruction runs, so an IRQ taken on resume can't eat a later hit.
+        // instruction so it doesn't hit the same breakpoint again, unless the handler moved the
+        // PC. The core clears the skip once any instruction runs, so an IRQ taken on resume
+        // can't eat a later hit.
+        let pcs = [next_pc(&self.emu, Cpu::Arm9), next_pc(&self.emu, Cpu::Arm7)];
         for (cpu, is_stopped, skip) in [
             (
                 Cpu::Arm9,
@@ -483,7 +452,7 @@ impl Session {
             ),
         ] {
             if std::mem::take(is_stopped) {
-                *skip = at_breakpoint[cpu.index()];
+                *skip = exec_addrs[cpu as usize] == Some(pcs[cpu as usize]);
             }
         }
         result

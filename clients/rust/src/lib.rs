@@ -17,7 +17,7 @@ pub mod pb {
     tonic::include_proto!("dust_agent");
 }
 
-pub use pb::{Button, Control, Cpu, HookKind, MemRange};
+pub use pb::{Button, Control, Cpu, HookKind, MemRange, Regs, WatchChange};
 
 use pb::dust_agent_client::DustAgentClient;
 use std::{
@@ -248,14 +248,6 @@ pub async fn launch(rom: impl AsRef<Path>, opts: &LaunchOptions) -> Result<Sessi
     Ok(session)
 }
 
-/// CPU registers at a hook hit.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Regs {
-    /// r0-r15; r15 is the address of the next instruction to execute.
-    pub gprs: [u32; 16],
-    pub cpsr: u32,
-}
-
 /// A breakpoint or watchpoint hit. The emulator is stopped mid-frame until it is continued.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hit {
@@ -268,6 +260,7 @@ pub struct Hit {
     pub value: u32,
     /// Frames finished before the hit.
     pub frame: u64,
+    /// As [`Session::regs`] returns them: r15 reads ahead of the next instruction to execute.
     pub regs: Regs,
     /// Results of the reads registered with the hook, in order.
     pub reads: Vec<Vec<u8>>,
@@ -275,23 +268,14 @@ pub struct Hit {
 
 impl From<pb::HookHit> for Hit {
     fn from(hit: pb::HookHit) -> Self {
-        let (kind, cpu) = (hit.kind(), hit.cpu());
-        let regs = hit.regs.unwrap_or_default();
-        let mut gprs = [0; 16];
-        for (dst, src) in gprs.iter_mut().zip(&regs.gprs) {
-            *dst = *src;
-        }
         Hit {
+            kind: hit.kind(),
+            cpu: hit.cpu(),
             id: hit.id,
-            kind,
-            cpu,
             addr: hit.addr,
             value: hit.value,
             frame: hit.frame,
-            regs: Regs {
-                gprs,
-                cpsr: regs.cpsr,
-            },
+            regs: hit.regs.unwrap_or_default(),
             reads: hit.reads,
         }
     }
@@ -350,6 +334,12 @@ impl Session {
 
     /// Emulates `frames` frames and returns the status afterwards.
     pub async fn cycle(&self, frames: u32) -> Result<Status> {
+        Ok(self.step(frames).await?.0)
+    }
+
+    /// Like [`Session::cycle`], also returning the watched ranges that changed (see
+    /// [`Session::watch`]).
+    pub async fn step(&self, frames: u32) -> Result<(Status, Vec<WatchChange>)> {
         let response = self
             .client
             .grpc()
@@ -359,7 +349,149 @@ impl Session {
             })
             .await?
             .into_inner();
-        Ok(response.status.unwrap_or_default().into())
+        Ok((response.status.unwrap_or_default().into(), response.changes))
+    }
+
+    /// Reads `len` bytes at `addr` as `cpu` sees them.
+    pub async fn read(&self, cpu: Cpu, addr: u32, len: u32) -> Result<Vec<u8>> {
+        let response = self
+            .client
+            .grpc()
+            .read(pb::ReadRequest {
+                session_id: self.id.clone(),
+                cpu: cpu as i32,
+                addr,
+                len,
+            })
+            .await?;
+        Ok(response.into_inner().data)
+    }
+
+    pub async fn read_u8(&self, cpu: Cpu, addr: u32) -> Result<u8> {
+        Ok(self.read(cpu, addr, 1).await?[0])
+    }
+
+    pub async fn read_u16(&self, cpu: Cpu, addr: u32) -> Result<u16> {
+        let data = self.read(cpu, addr, 2).await?;
+        Ok(u16::from_le_bytes([data[0], data[1]]))
+    }
+
+    pub async fn read_u32(&self, cpu: Cpu, addr: u32) -> Result<u32> {
+        let data = self.read(cpu, addr, 4).await?;
+        Ok(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
+    }
+
+    /// Reads several ranges in one round trip.
+    pub async fn read_many(&self, cpu: Cpu, ranges: &[MemRange]) -> Result<Vec<Vec<u8>>> {
+        let response = self
+            .client
+            .grpc()
+            .read_many(pb::ReadManyRequest {
+                session_id: self.id.clone(),
+                cpu: cpu as i32,
+                ranges: ranges.to_vec(),
+            })
+            .await?;
+        Ok(response.into_inner().data)
+    }
+
+    async fn write_request(
+        &self,
+        cpu: Cpu,
+        addr: u32,
+        value: pb::write_request::Value,
+    ) -> Result<()> {
+        self.client
+            .grpc()
+            .write(pb::WriteRequest {
+                session_id: self.id.clone(),
+                cpu: cpu as i32,
+                addr,
+                value: Some(value),
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Writes `data` byte by byte.
+    pub async fn write(&self, cpu: Cpu, addr: u32, data: &[u8]) -> Result<()> {
+        self.write_request(cpu, addr, pb::write_request::Value::Data(data.to_vec()))
+            .await
+    }
+
+    /// Writes `value` as a single `size`-byte (1, 2 or 4) little-endian access.
+    pub async fn write_value(&self, cpu: Cpu, addr: u32, value: u32, size: u32) -> Result<()> {
+        self.write_request(
+            cpu,
+            addr,
+            pb::write_request::Value::Word(pb::ValueWrite { value, size }),
+        )
+        .await
+    }
+
+    pub async fn write_u8(&self, cpu: Cpu, addr: u32, value: u8) -> Result<()> {
+        self.write_value(cpu, addr, value.into(), 1).await
+    }
+
+    pub async fn write_u16(&self, cpu: Cpu, addr: u32, value: u16) -> Result<()> {
+        self.write_value(cpu, addr, value.into(), 2).await
+    }
+
+    pub async fn write_u32(&self, cpu: Cpu, addr: u32, value: u32) -> Result<()> {
+        self.write_value(cpu, addr, value, 4).await
+    }
+
+    /// r0-r15 (r15 reads ahead of the executing instruction) and cpsr.
+    pub async fn regs(&self, cpu: Cpu) -> Result<Regs> {
+        let response = self
+            .client
+            .grpc()
+            .get_regs(pb::RegsRequest {
+                session_id: self.id.clone(),
+                cpu: cpu as i32,
+            })
+            .await?;
+        Ok(response.into_inner())
+    }
+
+    /// `reg` 0-14 are r0-r14, 15 sets the next instruction to execute, 16 is cpsr.
+    pub async fn set_reg(&self, cpu: Cpu, reg: u32, value: u32) -> Result<()> {
+        self.client
+            .grpc()
+            .set_reg(pb::SetRegRequest {
+                session_id: self.id.clone(),
+                cpu: cpu as i32,
+                reg,
+                value,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Watches `len` bytes at `addr`; changes are returned by [`Session::step`].
+    pub async fn watch(&self, cpu: Cpu, addr: u32, len: u32) -> Result<u32> {
+        let response = self
+            .client
+            .grpc()
+            .watch(pb::WatchRequest {
+                session_id: self.id.clone(),
+                cpu: cpu as i32,
+                addr,
+                len,
+            })
+            .await?;
+        Ok(response.into_inner().watch_id)
+    }
+
+    pub async fn unwatch(&self, watch_id: u32) -> Result<()> {
+        self.client
+            .grpc()
+            .unwatch(pb::UnwatchRequest {
+                session_id: self.id.clone(),
+                watch_id,
+            })
+            .await?;
+        Ok(())
     }
 
     pub async fn pause(&self) -> Result<Status> {

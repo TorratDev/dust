@@ -57,7 +57,8 @@ async fn entry_breakpoint_fires_once_after_reset() {
     assert_eq!((hit.id, hit.kind, hit.cpu), (hook.id, hook.kind, Cpu::Arm9));
     assert_eq!(hit.addr, ARM9_ENTRY);
     assert_eq!(hit.frame, 0);
-    assert_eq!(hit.regs.gprs[15], ARM9_ENTRY);
+    // r15 reads 8 bytes ahead in ARM state.
+    assert_eq!(hit.regs.gprs[15], ARM9_ENTRY + 8);
     assert_eq!(hit.reads, vec![0xE59F_0018u32.to_le_bytes().to_vec()]);
 }
 
@@ -80,7 +81,7 @@ async fn write_watchpoint_fires_on_store() {
     let hit = &hits[0];
     assert_eq!((hit.id, hit.kind), (hook.id, HookKind::WriteWatchpoint));
     assert_eq!((hit.addr, hit.value), (STORE_ADDR, STORE_VALUE));
-    assert_eq!(hit.regs.gprs[15], ARM9_STORE + 4);
+    assert_eq!(hit.regs.gprs[15], ARM9_STORE + 4 + 8);
     assert_eq!(hit.reads, vec![STORE_VALUE.to_le_bytes().to_vec()]);
 }
 

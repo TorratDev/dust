@@ -1,4 +1,8 @@
-use crate::{breakpoints::Hooks, rtc, soft_renderer_3d, Keys};
+use crate::{
+    breakpoints::Hooks,
+    memory::{self, Cpu, Regs, WatchChange, Watches},
+    rtc, soft_renderer_3d, Keys,
+};
 use chrono::{DateTime, NaiveDateTime};
 use dust_core::{
     audio::DummyBackend as DummyAudioBackend,
@@ -47,6 +51,14 @@ pub struct Status {
     pub control: Control,
 }
 
+/// Result of [`Session::step`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StepResult {
+    pub status: Status,
+    /// Watched ranges that changed since the previous step (writes made in between included).
+    pub changes: Vec<WatchChange>,
+}
+
 #[derive(Debug)]
 pub enum Error {
     Io {
@@ -64,6 +76,8 @@ pub enum Error {
     },
     /// The emulated system powered off; reset the session to continue.
     Shutdown,
+    /// A bad memory/register request (size, register index, watch id).
+    InvalidArgument(String),
     /// No breakpoint or watchpoint with this id.
     NoSuchHook(u32),
     InvalidHook(String),
@@ -87,6 +101,7 @@ impl fmt::Display for Error {
                 write!(f, "touch position ({x}, {y}) is outside the 256x192 screen")
             }
             Error::Shutdown => f.write_str("the emulated system shut down"),
+            Error::InvalidArgument(msg) => f.write_str(msg),
             Error::NoSuchHook(id) => write!(f, "no breakpoint or watchpoint with id {id}"),
             Error::InvalidHook(msg) => write!(f, "invalid hook: {msg}"),
             Error::StoppedAtHook => {
@@ -257,6 +272,7 @@ pub struct Session {
     pub(crate) frame: u64,
     paused: bool,
     control: Control,
+    watches: Watches,
     /// Agent input, applied before every frame (see `input.rs`).
     pub(crate) keys: Keys,
     pub(crate) touch: Option<[u16; 2]>,
@@ -277,6 +293,7 @@ impl Session {
             frame: 0,
             paused: false,
             control: Control::default(),
+            watches: Watches::default(),
             keys: Keys::empty(),
             touch: None,
             hooks,
@@ -286,13 +303,16 @@ impl Session {
     /// Emulates `frames` whole frames. Stepping works while paused: pausing only stops
     /// free-running hosts (such as the desktop GUI) from advancing on their own. Breakpoint and
     /// watchpoint hits call the hit handler mid-frame (see [`Session::set_hit_handler`]).
-    pub fn step(&mut self, frames: u32) -> Result<Status, Error> {
+    pub fn step(&mut self, frames: u32) -> Result<StepResult, Error> {
         for _ in 0..frames {
             self.apply_input();
             self.run_frame()?;
             self.frame += 1;
         }
-        Ok(self.status())
+        Ok(StepResult {
+            status: self.status(),
+            changes: self.watches.changes(&mut self.emu),
+        })
     }
 
     pub fn pause(&mut self) {
@@ -304,7 +324,7 @@ impl Session {
     }
 
     /// Rebuilds the emulator from the same ROM and options; the frame counter restarts at 0 and
-    /// agent input is released. Breakpoints and watchpoints are kept.
+    /// agent input is released.
     pub fn reset(&mut self) -> Result<(), Error> {
         if self.current_hit().is_some() {
             return Err(Error::StoppedAtHook);
@@ -324,6 +344,39 @@ impl Session {
             paused: self.paused,
             control: self.control,
         }
+    }
+
+    pub fn read(&mut self, cpu: Cpu, addr: u32, len: u32) -> Result<Vec<u8>, Error> {
+        memory::read(&mut self.emu, cpu, addr, len)
+    }
+
+    /// Writes `data` byte by byte.
+    pub fn write(&mut self, cpu: Cpu, addr: u32, data: &[u8]) -> Result<(), Error> {
+        memory::write(&mut self.emu, cpu, addr, data)
+    }
+
+    /// Writes `value` as a single `size`-byte (1, 2 or 4) access.
+    pub fn write_value(&mut self, cpu: Cpu, addr: u32, value: u32, size: u32) -> Result<(), Error> {
+        memory::write_value(&mut self.emu, cpu, addr, value, size)
+    }
+
+    pub fn regs(&self, cpu: Cpu) -> Regs {
+        memory::regs(&self.emu, cpu)
+    }
+
+    /// `reg` 0-14 are r0-r14; 15 ([`memory::REG_PC`]) jumps to `value` as the next instruction;
+    /// 16 ([`memory::REG_CPSR`]) is cpsr.
+    pub fn set_reg(&mut self, cpu: Cpu, reg: u32, value: u32) -> Result<(), Error> {
+        memory::set_reg(&mut self.emu, cpu, reg, value)
+    }
+
+    /// Watches `len` bytes at `addr`; changes are reported by [`Session::step`].
+    pub fn watch(&mut self, cpu: Cpu, addr: u32, len: u32) -> Result<u32, Error> {
+        self.watches.add(&mut self.emu, cpu, addr, len)
+    }
+
+    pub fn unwatch(&mut self, watch_id: u32) -> Result<(), Error> {
+        self.watches.remove(watch_id)
     }
 
     pub fn emu(&mut self) -> &mut emu::Emu<Interpreter> {

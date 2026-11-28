@@ -61,7 +61,8 @@ fn entry_breakpoint_fires_once_after_reset() {
     assert_eq!(hit.cpu, Cpu::Arm9);
     assert_eq!(hit.addr, ARM9_ENTRY);
     assert_eq!(hit.frame, 0);
-    assert_eq!(hit.regs.gprs[15], ARM9_ENTRY);
+    // r15 reads 8 bytes ahead in ARM state.
+    assert_eq!(hit.regs.gprs[15], ARM9_ENTRY + 8);
     // ldr r0, [pc, #0x18]
     assert_eq!(hit.reads, vec![0xE59F_0018u32.to_le_bytes().to_vec()]);
 }
@@ -91,7 +92,7 @@ fn write_watchpoint_fires_on_store() {
     assert_eq!(hit.addr, STORE_ADDR);
     assert_eq!(hit.value, STORE_VALUE);
     // Stopped right after the store.
-    assert_eq!(hit.regs.gprs[15], ARM9_STORE + 4);
+    assert_eq!(hit.regs.gprs[15], ARM9_STORE + 4 + 8);
     assert_eq!(hit.regs.gprs[0], STORE_ADDR);
     assert_eq!(hit.reads, vec![STORE_VALUE.to_le_bytes().to_vec()]);
 }
@@ -165,7 +166,7 @@ fn arm7_breakpoint_and_list() {
     let hits = hits.borrow();
     assert_eq!(hits.len(), 1, "{hits:?}");
     assert_eq!((hits[0].cpu, hits[0].addr), (Cpu::Arm7, ARM7_ENTRY));
-    assert_eq!(hits[0].regs.gprs[15], ARM7_ENTRY);
+    assert_eq!(hits[0].regs.gprs[15], ARM7_ENTRY + 8);
 }
 
 #[test]
@@ -185,7 +186,7 @@ fn handler_cannot_step_and_can_interrupt() {
     assert!(matches!(session.request_continue(), Err(Error::NotStopped)));
     // The interrupted frame finishes on the next step.
     session.set_hit_handler(None);
-    assert_eq!(session.step(1).unwrap().frame, 1);
+    assert_eq!(session.step(1).unwrap().status.frame, 1);
 }
 
 fn exec_addrs(hits: &[HookHit]) -> Vec<u32> {

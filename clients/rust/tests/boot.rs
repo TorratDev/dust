@@ -66,11 +66,9 @@ async fn planned_rpcs_are_unimplemented() {
     let err = session
         .client()
         .grpc()
-        .read(pb::ReadRequest {
+        .screenshot(pb::ScreenshotRequest {
             session_id: session.id().to_owned(),
-            cpu: pb::Cpu::Arm9 as i32,
-            addr: 0x0200_0000,
-            len: 4,
+            format: pb::ImageFormat::Png as i32,
         })
         .await
         .unwrap_err();
