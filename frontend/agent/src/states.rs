@@ -249,6 +249,9 @@ impl Session {
     }
 
     fn load_decoded(&mut self, state: Decoded<'_>, save: Option<&[u8]>) -> Result<(), Error> {
+        if self.current_hit().is_some() {
+            return Err(Error::StoppedAtHook);
+        }
         let save = save.or(state.save);
         // A failed load can leave the emulator half-loaded: keep what's needed to roll back.
         let backup = self.persistent_contents()?;
@@ -275,6 +278,9 @@ impl Session {
             ));
         }
 
+        // Breakpoints and watchpoints aren't part of states; make sure the loaded emulator's bus
+        // still routes watched accesses through the checks.
+        self.hooks.install(&mut self.emu);
         if let Some(frame) = state.frame {
             self.frame = frame;
         }

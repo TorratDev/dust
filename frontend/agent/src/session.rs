@@ -1,4 +1,5 @@
 use crate::{
+    breakpoints::Hooks,
     memory::{self, Cpu, Regs, WatchChange, Watches},
     rtc, soft_renderer_3d, states, Keys,
 };
@@ -7,7 +8,7 @@ use dust_core::{
     audio::DummyBackend as DummyAudioBackend,
     cpu::{arm7, arm9, interpreter::Interpreter},
     ds_slot::{self, rom::header::Header},
-    emu::{self, RunOutput},
+    emu,
     flash::Flash,
     gpu::{engine_2d, engine_3d, Framebuffer},
     spi::firmware,
@@ -80,6 +81,15 @@ pub enum Error {
     Shutdown,
     /// A bad memory/register request (size, register index, watch id).
     InvalidArgument(String),
+    /// No breakpoint or watchpoint with this id.
+    NoSuchHook(u32),
+    InvalidHook(String),
+    /// Emulation can't be advanced or reset from a hook hit's handler; continue first.
+    StoppedAtHook,
+    /// Continue was requested while not stopped at a hook hit.
+    NotStopped,
+    /// The hit handler aborted the step; the emulator is left mid-frame.
+    Interrupted,
     /// A save state that can't be loaded.
     InvalidState(String),
     /// A cartridge save that can't be used (size, missing save).
@@ -101,6 +111,13 @@ impl fmt::Display for Error {
             }
             Error::Shutdown => f.write_str("the emulated system shut down"),
             Error::InvalidArgument(msg) => f.write_str(msg),
+            Error::NoSuchHook(id) => write!(f, "no breakpoint or watchpoint with id {id}"),
+            Error::InvalidHook(msg) => write!(f, "invalid hook: {msg}"),
+            Error::StoppedAtHook => {
+                f.write_str("stopped at a breakpoint or watchpoint; continue first")
+            }
+            Error::NotStopped => f.write_str("not stopped at a breakpoint or watchpoint"),
+            Error::Interrupted => f.write_str("the step was interrupted at a hook hit"),
             Error::InvalidState(msg) => write!(f, "invalid state: {msg}"),
             Error::InvalidSave(msg) => write!(f, "invalid save: {msg}"),
             Error::NoSave => f.write_str(
@@ -285,6 +302,8 @@ pub struct Session {
     /// Agent input, applied before every frame (see `input.rs`).
     pub(crate) keys: Keys,
     pub(crate) touch: Option<[u16; 2]>,
+    /// Breakpoints and watchpoints (see `breakpoints.rs`).
+    pub(crate) hooks: Hooks,
     /// Shown instead of the renderer's framebuffer until the next frame after loading a state.
     pub(crate) screen_override: Option<Box<Framebuffer>>,
 }
@@ -292,7 +311,9 @@ pub struct Session {
 impl Session {
     pub fn new(rom: impl Into<PathBuf>, opts: &SessionOptions) -> Result<Self, Error> {
         let inputs = Inputs::load(&rom.into(), opts)?;
-        let emu = inputs.build_emu()?;
+        let mut emu = inputs.build_emu()?;
+        let mut hooks = Hooks::default();
+        hooks.install(&mut emu);
         Ok(Session {
             game_title: inputs.game_title(),
             inputs,
@@ -303,22 +324,20 @@ impl Session {
             watches: Watches::default(),
             keys: Keys::empty(),
             touch: None,
+            hooks,
             screen_override: None,
         })
     }
 
     /// Emulates `frames` whole frames. Stepping works while paused: pausing only stops
-    /// free-running hosts (such as the desktop GUI) from advancing on their own.
+    /// free-running hosts (such as the desktop GUI) from advancing on their own. Breakpoint and
+    /// watchpoint hits call the hit handler mid-frame (see [`Session::set_hit_handler`]).
     pub fn step(&mut self, frames: u32) -> Result<StepResult, Error> {
         for _ in 0..frames {
             self.apply_input();
-            match self.emu.run() {
-                RunOutput::FrameFinished => {
-                    self.frame += 1;
-                    self.screen_override = None;
-                }
-                RunOutput::Shutdown => return Err(Error::Shutdown),
-            }
+            self.run_frame()?;
+            self.frame += 1;
+            self.screen_override = None;
         }
         Ok(StepResult {
             status: self.status(),
@@ -337,7 +356,11 @@ impl Session {
     /// Rebuilds the emulator from the same ROM and options (and the last imported save); the frame
     /// counter restarts at 0 and agent input is released.
     pub fn reset(&mut self) -> Result<(), Error> {
+        if self.current_hit().is_some() {
+            return Err(Error::StoppedAtHook);
+        }
         self.emu = self.inputs.build_emu()?;
+        self.hooks.install(&mut self.emu);
         self.frame = 0;
         self.keys = Keys::empty();
         self.touch = None;
