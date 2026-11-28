@@ -46,6 +46,10 @@ Total emulated frames/s with `StepBatch` (10 frames per call, test ROM from
 | 8 | 8600 | 1075 |
 | 16 | 8790 | 549 |
 
+Sessions beyond the core count stay usable: each session's 3D render thread handshake spins
+briefly, then yields the CPU. With 32 free-running sessions on the same machine this raised the
+total from ~1,600 to ~9,700 frames/s (16 sessions: ~7,300 to ~9,700).
+
 To measure on your machine:
 
 ```sh

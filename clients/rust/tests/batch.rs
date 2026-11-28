@@ -187,3 +187,22 @@ async fn several_servers_run_side_by_side() {
     assert!(a.unwrap().iter().all(|o| o.status.frame == 7));
     assert!(b.unwrap().iter().all(|o| o.status.frame == 9));
 }
+
+/// A 16-session reply spans several TCP segments; without TCP_NODELAY on the server each call
+/// stalled ~40 ms (Nagle's algorithm meeting the client's delayed ACK).
+#[tokio::test(flavor = "multi_thread")]
+async fn large_batch_replies_do_not_stall() {
+    let batch = batch(16).await;
+    let action = Action::default();
+    batch.step_all(&action, 1).await.unwrap();
+    let calls = 30;
+    let start = std::time::Instant::now();
+    for _ in 0..calls {
+        batch.step_all(&action, 1).await.unwrap();
+    }
+    let per_call = start.elapsed() / calls;
+    assert!(
+        per_call < std::time::Duration::from_millis(25),
+        "{per_call:?} per StepBatch"
+    );
+}
