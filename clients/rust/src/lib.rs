@@ -18,7 +18,8 @@ pub mod pb {
 }
 
 pub use pb::{
-    Button, Control, Cpu, Image, ImageFormat, MemRange, Regs, SaveFormat, StateBytes, WatchChange,
+    Button, Control, Cpu, Image, ImageFormat, MemRange, ObservationSpec, Regs, SaveFormat,
+    StateBytes, WatchChange,
 };
 
 use pb::dust_agent_client::DustAgentClient;
@@ -678,5 +679,170 @@ impl Session {
     pub async fn destroy(self) -> Result<()> {
         self.client.grpc().destroy_session(self.request()).await?;
         Ok(())
+    }
+}
+
+/// Input for one session in a [`Batch::step`]: held for exactly that step's frames.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Action {
+    pub buttons: Vec<Button>,
+    /// Bottom-screen pixel to touch.
+    pub touch: Option<(u32, u32)>,
+}
+
+impl Action {
+    pub fn buttons(buttons: &[Button]) -> Self {
+        Action {
+            buttons: buttons.to_vec(),
+            touch: None,
+        }
+    }
+
+    fn to_pb(&self) -> pb::Action {
+        pb::Action {
+            buttons: self.buttons.iter().map(|&button| button as i32).collect(),
+            touch: self.touch.map(|(x, y)| pb::TouchPoint { x, y }),
+            discrete: None,
+        }
+    }
+}
+
+/// What one session looks like after a [`Batch::step`].
+#[derive(Clone, Debug)]
+pub struct Observation {
+    pub status: Status,
+    /// Set when [`ObservationSpec::screen`] is.
+    pub screen: Option<Image>,
+    /// One entry per [`ObservationSpec::ram`] range.
+    pub ram: Vec<Vec<u8>>,
+}
+
+/// Several sessions on one server, stepped together with one `StepBatch` call: the server runs
+/// them concurrently, one thread each.
+///
+/// ```no_run
+/// # async fn run() -> Result<(), dust_client::Error> {
+/// use dust_client::{Action, Batch, Button};
+/// let batch = Batch::launch("game.nds", &Default::default(), 8).await?;
+/// let actions = vec![Action::buttons(&[Button::A]); batch.len()];
+/// let observations = batch.step(&actions, 4).await?;
+/// assert_eq!(observations[0].status.frame, 4);
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone)]
+pub struct Batch {
+    client: Client,
+    sessions: Vec<Session>,
+    observation: ObservationSpec,
+}
+
+impl Batch {
+    /// Groups existing sessions; they must all be on `client`'s server.
+    pub fn new(client: Client, sessions: Vec<Session>) -> Self {
+        Batch {
+            client,
+            sessions,
+            observation: ObservationSpec::default(),
+        }
+    }
+
+    /// Creates `count` sessions with `rom` on `client`'s server.
+    pub async fn create(
+        client: &Client,
+        rom: impl AsRef<Path>,
+        opts: &SessionOptions,
+        count: usize,
+    ) -> Result<Self> {
+        let rom = rom.as_ref().to_owned();
+        let mut tasks = tokio::task::JoinSet::new();
+        for index in 0..count {
+            let (client, rom, opts) = (client.clone(), rom.clone(), opts.clone());
+            tasks.spawn(async move { (index, client.create_session(rom, &opts).await) });
+        }
+        let mut sessions: Vec<Option<Session>> = vec![None; count];
+        while let Some(joined) = tasks.join_next().await {
+            let (index, session) = joined.map_err(|err| Error::Io(io::Error::other(err)))?;
+            sessions[index] = Some(session?);
+        }
+        Ok(Batch::new(
+            client.clone(),
+            sessions.into_iter().map(Option::unwrap).collect(),
+        ))
+    }
+
+    /// Starts a `dust-headless` (see [`launch`]) hosting `count` sessions with `rom`; the server
+    /// is killed when the batch drops.
+    pub async fn launch(rom: impl AsRef<Path>, opts: &LaunchOptions, count: usize) -> Result<Self> {
+        let first = launch(rom.as_ref(), opts).await?;
+        let mut batch =
+            Batch::create(first.client(), rom, &opts.session, count.saturating_sub(1)).await?;
+        if count > 0 {
+            batch.sessions.insert(0, first);
+        }
+        Ok(batch)
+    }
+
+    /// Sets what [`Batch::step`] returns besides each session's status.
+    pub fn with_observation(mut self, observation: ObservationSpec) -> Self {
+        self.observation = observation;
+        self
+    }
+
+    pub fn sessions(&self) -> &[Session] {
+        &self.sessions
+    }
+
+    pub fn len(&self) -> usize {
+        self.sessions.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.sessions.is_empty()
+    }
+
+    /// Steps every session `frames` frames (0 counts as 1), session `i` holding `actions[i]`;
+    /// returns the observations in session order. `actions` must have one entry per session.
+    pub async fn step(&self, actions: &[Action], frames: u32) -> Result<Vec<Observation>> {
+        if actions.len() != self.sessions.len() {
+            return Err(Error::Rpc(tonic::Status::invalid_argument(format!(
+                "{} actions for {} sessions",
+                actions.len(),
+                self.sessions.len()
+            ))));
+        }
+        let response = self
+            .client
+            .grpc()
+            .step_batch(pb::StepBatchRequest {
+                items: self
+                    .sessions
+                    .iter()
+                    .zip(actions)
+                    .map(|(session, action)| pb::BatchItem {
+                        session_id: session.id.clone(),
+                        action: Some(action.to_pb()),
+                        frames,
+                    })
+                    .collect(),
+                observation: Some(self.observation.clone()),
+            })
+            .await?
+            .into_inner();
+        Ok(response
+            .observations
+            .into_iter()
+            .map(|observation| Observation {
+                status: observation.status.unwrap_or_default().into(),
+                screen: observation.screen,
+                ram: observation.ram,
+            })
+            .collect())
+    }
+
+    /// Steps every session with the same action.
+    pub async fn step_all(&self, action: &Action, frames: u32) -> Result<Vec<Observation>> {
+        self.step(&vec![action.clone(); self.sessions.len()], frames)
+            .await
     }
 }

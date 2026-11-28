@@ -30,6 +30,31 @@
 | macOS x86_64 binary | [macOS-x86_64.zip](https://nightly.link/kelpsyberry/dust/workflows/build-release/main/macOS-x86_64.zip) | [macOS-x86_64-debug.zip](https://nightly.link/kelpsyberry/dust/workflows/build-release/main/macOS-x86_64-debug.zip) | [macOS-x86_64-debug-gdb.zip](https://nightly.link/kelpsyberry/dust/workflows/build-release/main/macOS-x86_64-debug-gdb.zip) |
 | macOS ARM64 binary | [macOS-aarch64.zip](https://nightly.link/kelpsyberry/dust/workflows/build-release/main/macOS-aarch64.zip) | [macOS-aarch64-debug.zip](https://nightly.link/kelpsyberry/dust/workflows/build-release/main/macOS-aarch64-debug.zip) | [macOS-aarch64-debug-gdb.zip](https://nightly.link/kelpsyberry/dust/workflows/build-release/main/macOS-aarch64-debug-gdb.zip) |
 
+## Parallel sessions (agent API)
+
+One `dust-headless` hosts many sessions, each on its own thread; `StepBatch` (`dust_client::Batch`
+in the Rust client) steps them concurrently and returns every observation in one reply. Several
+`dust-headless` processes on different ports work side by side as well.
+
+Total emulated frames/s with `StepBatch` (10 frames per call, test ROM from
+`tools/fetch_test_rom.sh`, 4-core Xeon @ 2.30 GHz, release build):
+
+| Sessions | Frames/s (total) | Frames/s (per session) |
+|---:|---:|---:|
+| 1 | 2726 | 2726 |
+| 4 | 7805 | 1951 |
+| 8 | 8600 | 1075 |
+| 16 | 8790 | 549 |
+
+To measure on your machine:
+
+```sh
+cargo build --release -p dust-headless
+cd clients/rust
+DUST_HEADLESS=../../target/release/dust-headless \
+    cargo run --release --example batch_bench -- ../../tests/roms/test.nds
+```
+
 ## Credits
 - Martin Korth, for summarizing resources on the DS on [GBATEK](https://problemkaputt.de/gbatek.htm)
 - [Arisotura](https://github.com/Arisotura), for her research on the system in melonDS, [test ROMs](https://github.com/Arisotura/arm7wrestler) and [corrections and additions to the info on GBATEK](https://melonds.kuribo64.net/board/thread.php?id=13), and for the game database used in this emulator

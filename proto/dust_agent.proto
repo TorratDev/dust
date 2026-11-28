@@ -81,7 +81,10 @@ service DustAgent {
   rpc Logs(LogsRequest) returns (LogsResponse);
 
   // --- Parallel sessions and RL -----------------------------------------------------------------
-  // Steps several sessions concurrently and returns all observations in one reply.
+  // Steps several sessions concurrently (each on its own thread) and returns all observations in
+  // one reply, in request order. Each session appears at most once. The whole request is checked
+  // before any session steps; if a session fails while stepping (e.g. it shut down), the call
+  // fails and the other sessions stay stepped.
   rpc StepBatch(StepBatchRequest) returns (StepBatchResponse);
   rpc LoadScenario(LoadScenarioRequest) returns (Empty);
   // Loads one of the scenario's start states and returns the first observation.
@@ -374,6 +377,8 @@ message Event {
 enum ImageFormat {
   IMAGE_FORMAT_RAW_RGB = 0;
   IMAGE_FORMAT_PNG = 1;
+  // 1 byte of luma per pixel (BT.601 weights), row by row.
+  IMAGE_FORMAT_RAW_GRAY = 2;
 }
 
 message ScreenshotRequest {
@@ -512,15 +517,20 @@ message LogsResponse {
 // --- Parallel sessions and RL -------------------------------------------------------------------
 
 message ObservationSpec {
+  // Both screens as raw pixels (IMAGE_FORMAT_RAW_RGB, or IMAGE_FORMAT_RAW_GRAY with grayscale).
   bool screen = 1;
   bool grayscale = 2;
-  // Integer downscale factor; 0 or 1 = full size.
+  // Integer downscale factor (block average; partial blocks at the edges are dropped), at most
+  // 256; 0 or 1 = full size.
   uint32 downscale = 3;
+  // ARM9 bus ranges, read after stepping.
   repeated MemRange ram = 4;
   // The loaded scenario's variables.
   bool variables = 5;
 }
 
+// Held for exactly the item's frames (like a one-step Sequence); afterwards the session's held
+// buttons and touch are back to what they were.
 message Action {
   repeated Button buttons = 1;
   optional TouchPoint touch = 2;

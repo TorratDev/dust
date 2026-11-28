@@ -53,17 +53,27 @@ impl Worker {
         }
     }
 
+    /// Queues `f` on the session's thread right away; await the returned future for its result.
+    /// Submitting to several workers before awaiting runs them concurrently.
+    pub fn submit<R: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut Session) -> R + Send + 'static,
+    ) -> impl std::future::Future<Output = Result<R, CallError>> {
+        let (tx, rx) = oneshot::channel();
+        let sent = self.jobs.send(Box::new(move |session| {
+            let _ = tx.send(f(session));
+        }));
+        async move {
+            sent.map_err(|_| CallError::Stopped)?;
+            rx.await.map_err(|_| CallError::Stopped)
+        }
+    }
+
     /// Runs `f` on the session's thread and returns its result.
     pub async fn call<R: Send + 'static>(
         &self,
         f: impl FnOnce(&mut Session) -> R + Send + 'static,
     ) -> Result<R, CallError> {
-        let (tx, rx) = oneshot::channel();
-        self.jobs
-            .send(Box::new(move |session| {
-                let _ = tx.send(f(session));
-            }))
-            .map_err(|_| CallError::Stopped)?;
-        rx.await.map_err(|_| CallError::Stopped)
+        self.submit(f).await
     }
 }

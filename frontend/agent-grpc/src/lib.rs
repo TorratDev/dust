@@ -19,7 +19,7 @@ use std::{
     },
 };
 use tokio::net::TcpListener;
-use tokio_stream::{wrappers::TcpListenerStream, Stream};
+use tokio_stream::{wrappers::TcpListenerStream, Stream, StreamExt};
 use tonic::{Request, Response, Status};
 use worker::{CallError, Worker};
 
@@ -69,7 +69,13 @@ impl AgentService {
 pub async fn serve(listener: TcpListener) -> Result<(), tonic::transport::Error> {
     tonic::transport::Server::builder()
         .add_service(AgentService::new().into_server())
-        .serve_with_incoming(TcpListenerStream::new(listener))
+        // Without TCP_NODELAY, replies past a few segments (such as StepBatch with many sessions)
+        // stall ~40 ms on Nagle's algorithm meeting the client's delayed ACK.
+        .serve_with_incoming(TcpListenerStream::new(listener).map(|stream| {
+            stream.inspect(|stream| {
+                let _ = stream.set_nodelay(true);
+            })
+        }))
         .await
 }
 
@@ -136,6 +142,7 @@ fn image_format_from_pb(format: i32) -> Result<ImageFormat, Status> {
     match pb::ImageFormat::try_from(format) {
         Ok(pb::ImageFormat::RawRgb) => Ok(ImageFormat::RawRgb),
         Ok(pb::ImageFormat::Png) => Ok(ImageFormat::Png),
+        Ok(pb::ImageFormat::RawGray) => Ok(ImageFormat::RawGray),
         Err(_) => Err(Status::invalid_argument(format!(
             "unknown image format {format}"
         ))),
@@ -178,6 +185,89 @@ fn step_response(result: dust_agent::StepResult) -> pb::StepResponse {
             })
             .collect(),
     }
+}
+
+fn image_format_to_pb(format: ImageFormat) -> pb::ImageFormat {
+    match format {
+        ImageFormat::RawRgb => pb::ImageFormat::RawRgb,
+        ImageFormat::Png => pb::ImageFormat::Png,
+        ImageFormat::RawGray => pb::ImageFormat::RawGray,
+    }
+}
+
+/// A `BatchItem`, checked and converted before any session steps.
+struct BatchJob {
+    worker: Worker,
+    session_id: String,
+    step: InputStep,
+}
+
+fn batch_job(service: &AgentService, item: pb::BatchItem) -> Result<BatchJob, Status> {
+    let action = item.action.unwrap_or_default();
+    if action.discrete.is_some() {
+        return Err(Status::failed_precondition(format!(
+            "session {:?}: discrete actions need a loaded scenario (LoadScenario)",
+            item.session_id
+        )));
+    }
+    let touch = action
+        .touch
+        .map(|p| {
+            let (x, y) = (touch_coord(p.x), touch_coord(p.y));
+            if x >= dust_agent::TOUCH_WIDTH || y >= dust_agent::TOUCH_HEIGHT {
+                return Err(Status::invalid_argument(format!(
+                    "session {:?}: touch position ({}, {}) is outside the 256x192 screen",
+                    item.session_id, p.x, p.y
+                )));
+            }
+            Ok([x, y])
+        })
+        .transpose()?;
+    Ok(BatchJob {
+        worker: service.worker(&item.session_id)?,
+        step: InputStep {
+            keys: keys_from_pb(&action.buttons)?,
+            touch,
+            // Without a scenario the default frame skip is 1.
+            frames: item.frames.max(1),
+        },
+        session_id: item.session_id,
+    })
+}
+
+/// Steps one batch item and builds its observation; runs on the session's thread.
+fn step_and_observe(
+    session: &mut dust_agent::Session,
+    step: InputStep,
+    spec: &pb::ObservationSpec,
+) -> Result<pb::Observation, dust_agent::Error> {
+    let status = session.sequence(&[step])?.status;
+    let screen = if spec.screen {
+        let image = session.observe_screen(spec.grayscale, spec.downscale)?;
+        Some(pb::Image {
+            width: image.width,
+            height: image.height,
+            format: image_format_to_pb(image.format) as i32,
+            data: image.data,
+        })
+    } else {
+        None
+    };
+    let ram = spec
+        .ram
+        .iter()
+        .map(|range| session.read(dust_agent::Cpu::Arm9, range.addr, range.len))
+        .collect::<Result<_, _>>()?;
+    Ok(pb::Observation {
+        session_id: String::new(),
+        status: Some(status_to_pb(status)),
+        screen,
+        ram,
+        variables: Vec::new(),
+        reward: 0.0,
+        terminated: false,
+        truncated: false,
+    })
 }
 
 fn optional_path(path: String) -> Option<PathBuf> {
@@ -530,6 +620,80 @@ service_impl! {
             }))
         }
 
+        async fn step_batch(
+            &self,
+            request: Request<pb::StepBatchRequest>,
+        ) -> Result<Response<pb::StepBatchResponse>, Status> {
+            let request = request.into_inner();
+            let spec = std::sync::Arc::new(request.observation.unwrap_or_default());
+            if spec.variables {
+                return Err(Status::failed_precondition(
+                    "observation variables need a loaded scenario (LoadScenario)",
+                ));
+            }
+            if spec.downscale > dust_agent::SCREENSHOT_WIDTH {
+                return Err(Status::invalid_argument(format!(
+                    "downscale {} is larger than the screen width",
+                    spec.downscale
+                )));
+            }
+            let mut seen = std::collections::HashSet::new();
+            let jobs = request
+                .items
+                .into_iter()
+                .map(|item| {
+                    if !seen.insert(item.session_id.clone()) {
+                        return Err(Status::invalid_argument(format!(
+                            "session {:?} appears more than once",
+                            item.session_id
+                        )));
+                    }
+                    batch_job(self, item)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            // Queue every session's step before waiting on any, so they all run at once.
+            let pending: Vec<_> = jobs
+                .into_iter()
+                .map(|job| {
+                    let spec = spec.clone();
+                    let reply = job
+                        .worker
+                        .submit(move |session| step_and_observe(session, job.step, &spec));
+                    (job.session_id, reply)
+                })
+                .collect();
+            let mut observations = Vec::with_capacity(pending.len());
+            let mut first_error = None;
+            for (session_id, reply) in pending {
+                let result = match reply.await {
+                    Ok(Ok(observation)) => Ok(observation),
+                    Ok(Err(err)) => Err(agent_error(err)),
+                    Err(CallError::Stopped) => {
+                        Err(Status::aborted("the session's worker thread stopped"))
+                    }
+                };
+                match result {
+                    Ok(mut observation) => {
+                        observation.session_id = session_id;
+                        observations.push(observation);
+                    }
+                    Err(status) => {
+                        first_error.get_or_insert_with(|| {
+                            Status::new(
+                                status.code(),
+                                format!("session {session_id:?}: {}", status.message()),
+                            )
+                        });
+                    }
+                }
+            }
+            match first_error {
+                Some(status) => Err(status),
+                None => Ok(Response::new(pb::StepBatchResponse { observations })),
+            }
+        }
+
         async fn save_state(
             &self,
             request: Request<pb::StatePathRequest>,
@@ -651,7 +815,6 @@ service_impl! {
     logs(pb::LogsRequest) -> pb::LogsResponse;
 
     // Parallel sessions and RL
-    step_batch(pb::StepBatchRequest) -> pb::StepBatchResponse;
     load_scenario(pb::LoadScenarioRequest) -> pb::Empty;
     reset_episode(pb::ResetEpisodeRequest) -> pb::Observation;
 

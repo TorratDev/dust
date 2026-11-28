@@ -18,6 +18,20 @@ use std::{
     thread,
 };
 
+/// Busy-waits until `done`, yielding the CPU after a short spin: with more sessions than cores,
+/// pure spinning would burn whole timeslices while the thread being waited on isn't running.
+fn wait_until(mut done: impl FnMut() -> bool) {
+    let mut spins = 0u32;
+    while !done() {
+        if spins < 1 << 10 {
+            spins += 1;
+            hint::spin_loop();
+        } else {
+            thread::yield_now();
+        }
+    }
+}
+
 struct SharedData {
     rendering_data: Box<UnsafeCell<RenderingData>>,
     scanline_buffer: Box<UnsafeCell<[Scanline<u32>; SCREEN_HEIGHT]>>,
@@ -34,12 +48,10 @@ pub struct Tx {
 
 impl Tx {
     fn wait_for_frame_end(&self) {
-        while {
+        wait_until(|| {
             let processing_scanline = self.shared_data.processing_scanline.load(Ordering::Acquire);
-            processing_scanline == u8::MAX || processing_scanline < SCREEN_HEIGHT as u8
-        } {
-            hint::spin_loop();
-        }
+            processing_scanline != u8::MAX && processing_scanline >= SCREEN_HEIGHT as u8
+        });
     }
 }
 
@@ -99,12 +111,10 @@ pub struct Rx {
 
 impl Rx {
     fn wait_for_line(&self, line: u8) {
-        while {
+        wait_until(|| {
             let processing_scanline = self.shared_data.processing_scanline.load(Ordering::Acquire);
-            processing_scanline == u8::MAX || processing_scanline <= line
-        } {
-            hint::spin_loop();
-        }
+            processing_scanline != u8::MAX && processing_scanline > line
+        });
     }
 }
 
