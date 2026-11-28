@@ -6,7 +6,8 @@ publish = false
 description = "Programmatic control API over dust's emulator core (Session)"
 
 [dependencies]
-dust-core = { path = "../../core" }
+# The debugger hooks back breakpoints and watchpoints.
+dust-core = { path = "../../core", features = ["debugger-hooks"] }
 dust-soft-2d = { path = "../../render/soft-2d" }
 dust-soft-3d = { path = "../../render/soft-3d" }
 chrono = "0.4"

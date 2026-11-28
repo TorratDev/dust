@@ -1,31 +1,13 @@
-//! Agent input reaches the emulated hardware. Uses the ROM from `tools/fetch_test_rom.sh`
-//! (generated if missing) or `$DUST_TEST_ROM`.
+//! Agent input reaches the emulated hardware.
 
+mod common;
+
+use common::test_rom;
 use dust_agent::{InputStep, Keys, Session, SessionOptions, LID_CLOSED};
 use dust_core::cpu::{arm7, arm9, bus::DebugCpuAccess};
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-};
 
 const KEYINPUT: u32 = 0x0400_0130;
 const EXTKEYIN: u32 = 0x0400_0136;
-
-fn test_rom() -> PathBuf {
-    if let Some(rom) = std::env::var_os("DUST_TEST_ROM") {
-        return rom.into();
-    }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let rom = root.join("tests/roms/test.nds");
-    if !rom.exists() {
-        let status = Command::new("bash")
-            .arg(root.join("tools/fetch_test_rom.sh"))
-            .status()
-            .expect("couldn't run tools/fetch_test_rom.sh");
-        assert!(status.success(), "tools/fetch_test_rom.sh failed");
-    }
-    rom
-}
 
 fn session() -> Session {
     Session::new(test_rom(), &SessionOptions::default()).unwrap()

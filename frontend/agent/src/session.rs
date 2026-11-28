@@ -1,10 +1,10 @@
-use crate::{rtc, soft_renderer_3d, Keys};
+use crate::{breakpoints::Hooks, rtc, soft_renderer_3d, Keys};
 use chrono::{DateTime, NaiveDateTime};
 use dust_core::{
     audio::DummyBackend as DummyAudioBackend,
     cpu::{arm7, arm9, interpreter::Interpreter},
     ds_slot::{self, rom::header::Header},
-    emu::{self, RunOutput},
+    emu,
     flash::Flash,
     gpu::{engine_2d, engine_3d},
     spi::firmware,
@@ -64,6 +64,15 @@ pub enum Error {
     },
     /// The emulated system powered off; reset the session to continue.
     Shutdown,
+    /// No breakpoint or watchpoint with this id.
+    NoSuchHook(u32),
+    InvalidHook(String),
+    /// Emulation can't be advanced or reset from a hook hit's handler; continue first.
+    StoppedAtHook,
+    /// Continue was requested while not stopped at a hook hit.
+    NotStopped,
+    /// The hit handler aborted the step; the emulator is left mid-frame.
+    Interrupted,
 }
 
 impl fmt::Display for Error {
@@ -78,6 +87,13 @@ impl fmt::Display for Error {
                 write!(f, "touch position ({x}, {y}) is outside the 256x192 screen")
             }
             Error::Shutdown => f.write_str("the emulated system shut down"),
+            Error::NoSuchHook(id) => write!(f, "no breakpoint or watchpoint with id {id}"),
+            Error::InvalidHook(msg) => write!(f, "invalid hook: {msg}"),
+            Error::StoppedAtHook => {
+                f.write_str("stopped at a breakpoint or watchpoint; continue first")
+            }
+            Error::NotStopped => f.write_str("not stopped at a breakpoint or watchpoint"),
+            Error::Interrupted => f.write_str("the step was interrupted at a hook hit"),
         }
     }
 }
@@ -238,18 +254,22 @@ pub struct Session {
     inputs: Inputs,
     pub(crate) emu: emu::Emu<Interpreter>,
     game_title: String,
-    frame: u64,
+    pub(crate) frame: u64,
     paused: bool,
     control: Control,
     /// Agent input, applied before every frame (see `input.rs`).
     pub(crate) keys: Keys,
     pub(crate) touch: Option<[u16; 2]>,
+    /// Breakpoints and watchpoints (see `breakpoints.rs`).
+    pub(crate) hooks: Hooks,
 }
 
 impl Session {
     pub fn new(rom: impl Into<PathBuf>, opts: &SessionOptions) -> Result<Self, Error> {
         let inputs = Inputs::load(&rom.into(), opts)?;
-        let emu = inputs.build_emu()?;
+        let mut emu = inputs.build_emu()?;
+        let mut hooks = Hooks::default();
+        hooks.install(&mut emu);
         Ok(Session {
             game_title: inputs.game_title(),
             inputs,
@@ -259,18 +279,18 @@ impl Session {
             control: Control::default(),
             keys: Keys::empty(),
             touch: None,
+            hooks,
         })
     }
 
     /// Emulates `frames` whole frames. Stepping works while paused: pausing only stops
-    /// free-running hosts (such as the desktop GUI) from advancing on their own.
+    /// free-running hosts (such as the desktop GUI) from advancing on their own. Breakpoint and
+    /// watchpoint hits call the hit handler mid-frame (see [`Session::set_hit_handler`]).
     pub fn step(&mut self, frames: u32) -> Result<Status, Error> {
         for _ in 0..frames {
             self.apply_input();
-            match self.emu.run() {
-                RunOutput::FrameFinished => self.frame += 1,
-                RunOutput::Shutdown => return Err(Error::Shutdown),
-            }
+            self.run_frame()?;
+            self.frame += 1;
         }
         Ok(self.status())
     }
@@ -284,9 +304,13 @@ impl Session {
     }
 
     /// Rebuilds the emulator from the same ROM and options; the frame counter restarts at 0 and
-    /// agent input is released.
+    /// agent input is released. Breakpoints and watchpoints are kept.
     pub fn reset(&mut self) -> Result<(), Error> {
+        if self.current_hit().is_some() {
+            return Err(Error::StoppedAtHook);
+        }
         self.emu = self.inputs.build_emu()?;
+        self.hooks.install(&mut self.emu);
         self.frame = 0;
         self.keys = Keys::empty();
         self.touch = None;
