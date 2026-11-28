@@ -6,7 +6,7 @@ publish = false
 
 [features]
 logging = ["slog", "slog-term", "slog-async", "slog-imgui"]
-log = ["logging", "dust-core/log"]
+log = ["logging", "dust-core/log", "dust-agent?/log"]
 debug-views = [
     "imgui-memory-editor",
     "realfft",

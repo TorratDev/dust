@@ -5,6 +5,11 @@ edition = "2021"
 publish = false
 description = "Programmatic control API over dust's emulator core (Session)"
 
+[features]
+# Needed when dust-core's `log` feature is on in the same build (e.g. the desktop GUI with both
+# `log` and `agent-server`): core then takes loggers, and sessions log nowhere.
+log = ["dust-core/log", "slog"]
+
 [dependencies]
 dust-core = { path = "../../core" }
 dust-soft-2d = { path = "../../render/soft-2d" }
@@ -12,3 +17,4 @@ dust-soft-3d = { path = "../../render/soft-3d" }
 chrono = "0.4"
 miniz_oxide = "0.8"
 png = "0.17"
+slog = { version = "2.7", optional = true }

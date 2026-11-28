@@ -231,6 +231,8 @@ impl Inputs {
         let firmware = Flash::new(
             SaveContents::Existing(firmware),
             firmware::id_for_model(self.model),
+            #[cfg(feature = "log")]
+            crate::logger(),
         )
         .map_err(|err| Error::InvalidFirmware(format!("{err:?}")))?;
 
@@ -242,7 +244,11 @@ impl Inputs {
 
         let spi = match &self.save {
             Some(save) => states::spi_for_save(SaveContents::Existing(save.clone()))?,
-            None => ds_slot::spi::Empty::new().into(),
+            None => ds_slot::spi::Empty::new(
+                #[cfg(feature = "log")]
+                crate::logger(),
+            )
+            .into(),
         };
 
         let mut builder = emu::Builder::new(
@@ -255,6 +261,8 @@ impl Inputs {
             Box::new(renderer_2d) as Box<dyn engine_2d::Renderer>,
             Box::new(renderer_3d_tx) as Box<dyn engine_3d::RendererTx>,
             None,
+            #[cfg(feature = "log")]
+            crate::logger(),
         );
         builder.arm7_bios = boxed_bios(&self.arm7_bios);
         builder.arm9_bios = boxed_bios(&self.arm9_bios);

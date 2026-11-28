@@ -247,6 +247,8 @@ struct Args {
 }
 
 impl Args {
+    // With the agent server, option values are taken from `iter` inside the loop.
+    #[cfg_attr(not(feature = "agent-server"), allow(clippy::while_let_on_iterator))]
     fn parse() -> Self {
         let mut args = Args {
             rom_path: None,

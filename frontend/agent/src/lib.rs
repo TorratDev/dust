@@ -12,6 +12,12 @@ mod session;
 mod soft_renderer_3d;
 mod states;
 
+/// The logger dust-core's `log` feature makes constructors take; sessions discard their logs.
+#[cfg(feature = "log")]
+pub(crate) fn logger() -> slog::Logger {
+    slog::Logger::root(slog::Discard, slog::o!())
+}
+
 pub use input::{keys_from_desmume_mask, InputStep, Keys, LID_CLOSED, TOUCH_HEIGHT, TOUCH_WIDTH};
 pub use memory::{Cpu, Regs, WatchChange};
 pub use screen::{Image, ImageFormat, SCREENSHOT_HEIGHT, SCREENSHOT_WIDTH};

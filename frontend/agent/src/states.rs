@@ -153,13 +153,31 @@ pub(crate) fn spi_for_save(contents: SaveContents) -> Result<Spi, Error> {
     let len = contents.len();
     let invalid = || Error::InvalidSave(format!("unsupported save size: {len} B"));
     Ok(match len {
-        0x200 => Eeprom4k::new(contents, None).map_err(|_| invalid())?.into(),
-        0x2000 | 0x1_0000 | 0x2_0000 => EepromFram::new(contents, None)
-            .map_err(|_| invalid())?
-            .into(),
-        0x4_0000 | 0x8_0000 | 0x10_0000 => Flash::new(contents, [0; 20], false)
-            .map_err(|_| invalid())?
-            .into(),
+        0x200 => Eeprom4k::new(
+            contents,
+            None,
+            #[cfg(feature = "log")]
+            crate::logger(),
+        )
+        .map_err(|_| invalid())?
+        .into(),
+        0x2000 | 0x1_0000 | 0x2_0000 => EepromFram::new(
+            contents,
+            None,
+            #[cfg(feature = "log")]
+            crate::logger(),
+        )
+        .map_err(|_| invalid())?
+        .into(),
+        0x4_0000 | 0x8_0000 | 0x10_0000 => Flash::new(
+            contents,
+            [0; 20],
+            false,
+            #[cfg(feature = "log")]
+            crate::logger(),
+        )
+        .map_err(|_| invalid())?
+        .into(),
         _ => return Err(invalid()),
     })
 }
